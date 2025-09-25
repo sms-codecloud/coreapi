@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace ARJAPIADo.Controllers
 {
-    [Route("api/[controller]")]
+    //[Route("api/[controller]")]
     [ApiController]
     public class EmployeesController : ControllerBase
     {
@@ -16,13 +16,14 @@ namespace ARJAPIADo.Controllers
             _employeeRepository = employeeRepository;
         }
 
-        //// GET: api/Products
-        //[HttpGet]
-        //public ActionResult<IEnumerable<Employee>> Get()
+        // GET: api/Products
+        [HttpGet]
+        [Route("api/EmployeeList")]
+        public ActionResult<IEnumerable<Employee>> Get()
 
-        //{
-        //    return Ok(_employeeRepository.GetAllEmployees());
-        //}
+        {
+            return Ok(_employeeRepository.GetAllEmployees());
+        }
 
         //// GET api/Products/5
         //[HttpGet("{id}")]
@@ -36,33 +37,36 @@ namespace ARJAPIADo.Controllers
         //    return Ok(product);
         //}
 
-        //// POST api/Products
-        //[HttpPost]
-        //public ActionResult Post([FromBody] Employee employee)
-        //{
-        //    _employeeRepository.AddEmployee(employee);
-        //    return CreatedAtAction(nameof(Get), new { id = employee.EmployeeId }, employee);
-        //}
+        // POST api/Products
+        [HttpPost]
+        [Route("api/EmployeeSave")]
+        public ActionResult Post([FromBody] Employee employee)
+        {
+            _employeeRepository.AddEmployee(employee);
+            return CreatedAtAction(nameof(Get), new { id = employee.EmployeeId }, employee);
+        }
 
         //// PUT api/Products/5
-        //[HttpPut("{id}")]
-        //public ActionResult Put(int id, [FromBody] Employee employee)
-        //{
-        //    if (id != employee.EmployeeId)
-        //    {
-        //        return BadRequest();
-        //    }
-        //    _employeeRepository.UpdateEmployee(employee);
-        //    return NoContent();
-        //}
+        [HttpPost]
+        [Route("api/EmployeeUpdate")]
+        public ActionResult Put(int id, [FromBody] Employee employee)
+        {
+            if (id != employee.EmployeeId)
+            {
+                return BadRequest();
+            }
+            _employeeRepository.UpdateEmployee(employee);
+            return NoContent();
+        }
 
-        //// DELETE api/Products/5
-        //[HttpDelete("{id}")]
-        //public ActionResult Delete(int id)
-        //{
-        //    _employeeRepository.DeleteEmployee(id);
-        //    return NoContent();
-        //}
+        ////// DELETE api/Products/5
+        [HttpPost]
+        [Route("api/EmployeeDelete/id")]
+        public ActionResult Delete(int id)
+        {
+            _employeeRepository.DeleteEmployee(id);
+            return NoContent();
+        }
         [HttpGet]
         [Route("api/HealthAPI")]
         public ActionResult HealthAPI()
