@@ -1,4 +1,5 @@
 ﻿using ARJAPIADo.Models;
+using System.Data;
 using System.Data.SqlClient;
 
 namespace ARJAPIADo.DataAccess
@@ -24,7 +25,7 @@ namespace ARJAPIADo.DataAccess
                     {
                         employees.Add(new Employee
                         {
-                            EmployeeId = reader.GetInt32(0),
+                            EmployeeId = reader.GetInt64(0),
                             FirstName = reader.GetString(1),
                             LastName = reader.GetString(2),
                             PhoneNo = reader.GetString(3),
@@ -64,19 +65,27 @@ namespace ARJAPIADo.DataAccess
             return employee;
         }
 
-        public void AddEmployee(Employee employee)
+        public bool AddEmployee(Employee employee)
         {
-            using (var connection = new SqlConnection(_connectionString))
+            try
             {
-                var command = new SqlCommand("INSERT INTO Employees (Name, Quantity, Price) VALUES (@FirstName,@LastName,@PhoneNo, @Email, @Address)", connection);
-                command.Parameters.AddWithValue("@FirstName", employee.FirstName);
-                command.Parameters.AddWithValue("@LastName", employee.LastName);
-                command.Parameters.AddWithValue("@LastName", employee.PhoneNo);
-                command.Parameters.AddWithValue("@Email", employee.Email);
-                command.Parameters.AddWithValue("@Address", employee.Address);
-                connection.Open();
-                command.ExecuteNonQuery();
+                using (var connection = new SqlConnection(_connectionString))
+                {
+                    var command = new SqlCommand("INSERT INTO Employees (FirstName, LastName, PhoneNo,Email,Address) VALUES (@FirstName,@LastName,@PhoneNo, @Email, @Address)", connection);
+                    command.Parameters.AddWithValue("@FirstName", employee.FirstName);
+                    command.Parameters.AddWithValue("@LastName", employee.LastName);
+                    command.Parameters.AddWithValue("@PhoneNo", employee.PhoneNo);
+                    command.Parameters.AddWithValue("@Email", employee.Email);
+                    command.Parameters.AddWithValue("@Address", employee.Address);
+                    connection.Open();
+                    command.ExecuteNonQuery();
+                }
             }
+            catch(Exception ex)
+            {
+                return false;
+            }
+            return true;
         }
 
         public void UpdateEmployee(Employee employee)

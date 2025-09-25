@@ -42,8 +42,14 @@ namespace ARJAPIADo.Controllers
         [Route("api/EmployeeSave")]
         public ActionResult Post([FromBody] Employee employee)
         {
-            _employeeRepository.AddEmployee(employee);
-            return CreatedAtAction(nameof(Get), new { id = employee.EmployeeId }, employee);
+            if (_employeeRepository.AddEmployee(employee))
+            {
+                return Ok();
+            }
+            else
+            {
+                return BadRequest();
+            }
         }
 
         //// PUT api/Products/5
