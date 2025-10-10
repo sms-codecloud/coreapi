@@ -1,5 +1,5 @@
 pipeline {
-  agent { label 'win-dev' } // Windows 11 Jenkins agent
+  agent { label 'win-dev' } 
   options { disableConcurrentBuilds(); timestamps(); ansiColor('xterm') }
 
   parameters {
@@ -123,113 +123,7 @@ pipeline {
         }
       }
     }
-
-    # stage('Deploy') {
-    #     steps {
-    #         unstash 'published'
-    #         script {
-    #         if (params.DEPLOY_METHOD == 'WEBDEPLOY') {
-    #             withCredentials([string(credentialsId: 'SMARTER_ACCOUNT', variable: 'SMARTER_ACCOUNT')]) {
-    #             powershell '''
-    #                 $ErrorActionPreference = "Stop"
-
-    #                 # Validate msdeploy
-    #                 $msdeploy = "${env:MSDEPLOY_EXE}"
-    #                 if (-not (Test-Path $msdeploy)) {
-    #                 throw "msdeploy not found at $msdeploy. Install Web Deploy 3.x on this agent."
-    #                 }
-
-    #                 # Split only on the FIRST colon to tolerate ':' inside passwords
-    #                 $raw = $env:SMARTER_ACCOUNT
-    #                 $idx = $raw.IndexOf(':')
-    #                 if ($idx -lt 1) { throw "SMARTER_ACCOUNT must be 'username:password'." }
-    #                 $wdUser = $raw.Substring(0, $idx)
-    #                 $wdPass = $raw.Substring($idx + 1)
-
-    #                 $site   = $env:SITE_NAME
-    #                 $server = $env:WD_SERVER
-    #                 $port   = $env:WD_PORT
-    #                 $pub    = $env:PUBLISH_DIR
-
-    #                 if (-not (Test-Path $pub)) { throw "Publish folder not found: $pub" }
-
-    #                 $wdUrl = "https://$server`:$port/MsDeploy.axd?site=$site"
-
-    #                 # Use contentPath (local folder) -> iisApp (remote site)
-    #                 $args = @(
-    #                 '-verb:sync',
-    #                 ("-source:contentPath=""{0}""" -f $pub),
-    #                 ("-dest:iisApp=""{0}"",ComputerName=""{1}"",UserName=""{2}"",Password=""{3}"",AuthType=Basic,IncludeAcls=False" -f $site,$wdUrl,$wdUser,$wdPass),
-    #                 '-enableRule:AppOffline',
-    #                 '-retryAttempts:5',
-    #                 '-retryInterval:2000'
-    #                 )
-
-    #                 Write-Host "Invoking msdeploy -> $wdUrl (site=$site)"
-    #                 $p = Start-Process -FilePath $msdeploy -ArgumentList $args -NoNewWindow -PassThru -Wait
-    #                 if ($p.ExitCode -ne 0) { throw "msdeploy failed with exit code $($p.ExitCode)" }
-    #             '''
-    #             }
-    #         } else {
-    #             withCredentials([string(credentialsId: 'SMARTER_ACCOUNT', variable: 'SMARTER_ACCOUNT')]) {
-    #             powershell '''
-    #                 $ErrorActionPreference = "Stop"
-
-    #                 # Split only first colon
-    #                 $raw = $env:SMARTER_ACCOUNT
-    #                 $idx = $raw.IndexOf(':')
-    #                 if ($idx -lt 1) { throw "SMARTER_ACCOUNT must be 'username:password'." }
-    #                 $ftpUser = $raw.Substring(0, $idx)
-    #                 $ftpPass = $raw.Substring($idx + 1)
-
-    #                 $pub  = $env:PUBLISH_DIR
-    #                 $host = $env:FTP_HOST
-    #                 $path = ($env:FTP_PATH).Replace('\','/')
-    #                 if (-not (Test-Path $pub)) { throw "Publish folder not found: $pub" }
-
-    #                 $baseUri = "ftp://$host$path"
-
-    #                 function Ensure-FtpDir {
-    #                 param([string]$Uri,[System.Net.ICredentials]$Cred)
-    #                 $parts = ([Uri]$Uri).AbsolutePath.Trim('/') -split '/'
-    #                 $prefix = "ftp://$host/"
-    #                 $accum = $prefix
-    #                 foreach ($p in $parts) {
-    #                     if ([string]::IsNullOrWhiteSpace($p)) { continue }
-    #                     $accum = $accum + $p + '/'
-    #                     try {
-    #                     $req = [System.Net.FtpWebRequest]::Create($accum)
-    #                     $req.Method = [System.Net.WebRequestMethods+Ftp]::MakeDirectory
-    #                     $req.Credentials = $Cred
-    #                     $req.UseBinary = $true
-    #                     $req.KeepAlive = $false
-    #                     $req.GetResponse().Dispose()
-    #                     } catch { }  # ignore if exists
-    #                 }
-    #                 }
-
-    #                 $cred = New-Object System.Net.NetworkCredential($ftpUser,$ftpPass)
-
-    #                 Get-ChildItem -LiteralPath $pub -Recurse | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
-    #                 $rel = $_.FullName.Substring($pub.Length).TrimStart('\').Replace('\','/')
-    #                 $target = "$baseUri/$rel"
-    #                 $dirUri = $target.Substring(0, $target.LastIndexOf('/'))
-
-    #                 Ensure-FtpDir -Uri $dirUri -Cred $cred
-
-    #                 $wc = New-Object System.Net.WebClient
-    #                 $wc.Credentials = $cred
-    #                 $wc.UploadFile([Uri]$target, 'STOR', $_.FullName) | Out-Null
-    #                 }
-
-    #                 Write-Host "FTP deploy complete to $baseUri"
-    #             '''
-    #             }
-    #         }
-    #         }
-    #     }
-    # }
-
+    
 }
 
   post {
