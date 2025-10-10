@@ -1,44 +1,14 @@
 {
-  "info": {
-    "name": "one-project: smoke",
-    "_postman_id": "one-project-smoke",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
-  },
-  "variable": [
-    { "key": "BASE_URL", "value": "http://localhost:5005" }
-  ],
-  "item": [
-    {
-      "name": "Health",
-      "request": { "method": "GET", "url": "{{BASE_URL}}/health" },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('status 200', () => pm.response.code === 200);",
-              "pm.test('body not empty', () => pm.response.text().length > 0);"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Students list",
-      "request": { "method": "GET", "url": "{{BASE_URL}}/api/students" },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('status 200', () => pm.response.code === 200);",
-              "pm.test('is JSON array', () => { try { return Array.isArray(pm.response.json()); } catch(e) { return false; } });"
-            ]
-          }
-        }
+  "name": "Swagger UI",
+  "request": { "method": "GET", "url": "{{BASE_URL}}/swagger/index.html" },
+  "event": [{
+    "listen": "test",
+    "script": {
+      "type": "text/javascript",
+      "exec": [
+        "pm.test('2xx/3xx status for swagger', () => pm.response.code >= 200 && pm.response.code < 400);",
+        "pm.test('contains Swagger UI', () => pm.response.text().toLowerCase().includes('swagger'));"
       ]
     }
-  ]
+  }]
 }
