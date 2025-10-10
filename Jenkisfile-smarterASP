@@ -83,7 +83,7 @@ pipeline {
             $ErrorActionPreference = "Stop"
 
             # Paths
-            $repo        = Join-Path $env:WORKSPACE 'repo'
+            $repo        = Join-Path $env:WORKSPACE ''
             $collection  = Join-Path $repo 'tests\\postman\\smoke.collection.json'
             if (-not (Test-Path $collection)) { throw "Collection not found: $collection" }
 
