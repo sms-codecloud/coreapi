@@ -4,7 +4,7 @@ pipeline {
 
   parameters {
     string(name: 'CONFIGURATION', defaultValue: 'Release', description: 'Build configuration (Debug/Release)')
-    string(name: 'SMOKE_URLS',    defaultValue: '/swagger', description: 'Comma-separated paths to test locally')
+    string(name: 'SMOKE_BASE_URL', defaultValue: 'https://abc.xyz.com', description: 'Target base URL for smoke (e.g., https://abc.xyz.com)')
     choice(name:  'DEPLOY_METHOD', choices: ['WEBDEPLOY','FTP'], description: 'Choose deployment method')
 
     // Web Deploy (from SmarterASP.NET control panel → VS WebDeploy)
@@ -73,56 +73,74 @@ pipeline {
       }
     }
 
-    stage('Smoke-test (local run)') {
-      steps {
-        unstash 'published'
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          $pub = "$env:PUBLISH_DIR"
-          $dll = Get-ChildItem -LiteralPath $pub -Filter *.dll | Where-Object { $_.Name -notmatch "test|xunit" } | Select-Object -First 1
-          if (-not $dll) { throw "No DLL found in $pub" }
+    parameters {
+  string(name: 'SMOKE_BASE_URL', defaultValue: 'https://abc.xyz.com', description: 'Target base URL for smoke (e.g., https://abc.xyz.com)')
+}
 
-          $env:ASPNETCORE_URLS = "http://localhost:$($env:SMOKE_PORT)"
-          $proc = Start-Process -FilePath "dotnet" -ArgumentList "`"$($dll.FullName)`"" -WorkingDirectory $pub -PassThru
-          Set-Content "$env:WORKSPACE\\smoke.pid" $proc.Id
+        stage('Smoke-test (Postman/Newman)') {
+        steps {
+            powershell '''
+            $ErrorActionPreference = "Stop"
 
-          # Wait for the app to respond
-          $base = "http://localhost:$($env:SMOKE_PORT)"
-          $deadline = (Get-Date).AddMinutes(2)
-          while ((Get-Date) -lt $deadline) {
-            try { Invoke-WebRequest -UseBasicParsing -Uri "$base/" -TimeoutSec 2 | Out-Null; break }
-            catch { Start-Sleep -Milliseconds 500 }
-          }
+            # Paths
+            $repo        = Join-Path $env:WORKSPACE 'repo'
+            $collection  = Join-Path $repo 'tests\\postman\\smoke.collection.json'
+            if (-not (Test-Path $collection)) { throw "Collection not found: $collection" }
 
-          # Probe multiple paths
-          $ok = $false
-          $paths = ($env:SMOKE_URLS -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-          foreach ($path in $paths) {
-            try {
-              $r = Invoke-WebRequest -UseBasicParsing -Uri ($base + $path)
-              if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 600) { $ok = $true; break }
-            } catch {}
-          }
-          if (-not $ok) { throw "Smoke test failed at $base (paths tried: $($paths -join ', '))" }
-          Write-Host "Smoke test passed at $base"
-        '''
-      }
-      post {
-        always {
-          powershell '''
-            $ErrorActionPreference = "SilentlyContinue"
-            $pidFile = "$env:WORKSPACE\\smoke.pid"
-            if (Test-Path $pidFile) {
-              try {
-                $smokePid = [int](Get-Content -Path $pidFile -Raw).Trim()
-                if ($smokePid -gt 0) { Stop-Process -Id $smokePid -Force -ErrorAction SilentlyContinue }
-              } catch {}
-              Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
+            # Ensure choco/node once
+            if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+                Set-ExecutionPolicy Bypass -Scope Process -Force
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                Invoke-Expression ((New-Object Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
             }
-          '''
+            if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+                choco install nodejs-lts -y --no-progress
+                refreshenv | Out-Null
+            }
+
+            # Target
+            $baseUrl = "${env:SMOKE_BASE_URL}".TrimEnd('/')
+
+            # Quick readiness wait for /swagger/index.html (site might need a few seconds after deploy)
+            $deadline = (Get-Date).AddMinutes(2)
+            $ready = $false
+            while ((Get-Date) -lt $deadline) {
+                try {
+                $r = Invoke-WebRequest -UseBasicParsing -Uri ($baseUrl + '/swagger/index.html') -TimeoutSec 5
+                if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 400) { $ready = $true; break }
+                } catch {}
+                Start-Sleep -Seconds 3
+            }
+            if (-not $ready) { throw "Site did not respond with 2xx/3xx at $baseUrl/swagger/index.html within 2 minutes." }
+
+            # Reports
+            $outDir = Join-Path $env:WORKSPACE 'newman-reports'
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            $junit = Join-Path $outDir 'smoke-junit.xml'
+
+            # Prefer runtime BASE_URL
+            $env:BASE_URL = $baseUrl
+
+            # Run Postman via Newman; --insecure helps if the cert is not fully trusted yet
+            npx newman run "`"$collection`"" `
+                --reporters cli,junit `
+                --reporter-junit-export "`"$junit`"" `
+                --timeout-request 8000 `
+                --delay-request 100 `
+                --bail `
+                --insecure
+
+            Write-Host "✅ Newman smoke tests passed against $baseUrl"
+            '''
         }
-      }
+        post {
+            always {
+            junit allowEmptyResults: true, testResults: 'newman-reports/*.xml'
+            archiveArtifacts artifacts: 'newman-reports/**', onlyIfSuccessful: false
+            }
+        }
     }
+
 
 }
 
