@@ -78,10 +78,11 @@ pipeline {
             powershell '''
             $ErrorActionPreference = "Stop"
 
-            # Paths
+            # Paths (your repo is checked out to ...\\workspace\\coreapi\\repo)
             $repo        = Join-Path $env:WORKSPACE 'repo'
             $collection  = Join-Path $repo 'tests\\postman\\smoke.collection.json'
             $envFile     = Join-Path $repo 'tests\\postman\\local.env.json'
+
             if (-not (Test-Path $collection)) { throw "Collection not found: $collection" }
 
             # Ensure Chocolatey (one-time)
@@ -91,13 +92,13 @@ pipeline {
                 Invoke-Expression ((New-Object Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
             }
 
-            # Ensure Node (one-time)
+            # Ensure Node.js (one-time)
             if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
                 choco install nodejs-lts -y --no-progress
                 refreshenv | Out-Null
             }
 
-            # Wait until API is actually up before running tests (fast retry loop)
+            # Wait until API is ready
             $baseUrl = "${env:SMOKE_BASE_URL}"
             Write-Host "Waiting for API at $baseUrl ..."
             $deadline = (Get-Date).AddMinutes(2)
@@ -110,14 +111,21 @@ pipeline {
             }
             if (-not $ok) { throw "API did not become ready at $baseUrl within 2 minutes." }
 
-            # Newman run
+            # Build Newman args without ternary
+            $envArg = ""
+            if (Test-Path $envFile) {
+                $envArg = "--environment `"$envFile`""
+            }
+
+            # Reports
             $outDir = Join-Path $env:WORKSPACE 'newman-reports'
             New-Item -ItemType Directory -Force -Path $outDir | Out-Null
             $junit = Join-Path $outDir 'smoke-junit.xml'
 
-            $envArg = (Test-Path $envFile) ? "--environment `"$envFile`"" : ""
-            $env:BASE_URL = $baseUrl  # available to collection if you reference {{BASE_URL}}
+            # Prefer runtime BASE_URL
+            $env:BASE_URL = $baseUrl
 
+            # Run Newman (via npx)
             npx newman run "`"$collection`"" `
                 $envArg `
                 --reporters cli,junit `
