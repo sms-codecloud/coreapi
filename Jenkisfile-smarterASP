@@ -78,8 +78,8 @@ pipeline {
             powershell '''
             $ErrorActionPreference = "Stop"
 
-            # Paths (your repo is checked out to ...\\workspace\\coreapi\\repo)
-            $repo        = Join-Path $env:WORKSPACE 'repo'
+            # Paths (your repo is checked out to ...\\workspace\\coreapi)
+            $repo        = Join-Path $env:WORKSPACE ''
             $collection  = Join-Path $repo 'tests\\postman\\smoke.collection.json'
             $envFile     = Join-Path $repo 'tests\\postman\\local.env.json'
 
