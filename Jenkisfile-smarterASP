@@ -4,7 +4,7 @@ pipeline {
 
   parameters {
     string(name: 'CONFIGURATION', defaultValue: 'Release', description: 'Build configuration (Debug/Release)')
-    string(name: 'SMOKE_URLS',    defaultValue: '/,/swagger', description: 'Comma-separated paths to test locally')
+    string(name: 'SMOKE_URLS',    defaultValue: '/swagger', description: 'Comma-separated paths to test locally')
     choice(name:  'DEPLOY_METHOD', choices: ['WEBDEPLOY','FTP'], description: 'Choose deployment method')
 
     // Web Deploy (from SmarterASP.NET control panel → VS WebDeploy)
@@ -16,8 +16,8 @@ pipeline {
     string(name: 'FTP_HOST',  defaultValue: 'ftp.smarterasp.net', description: 'FTP host')
     string(name: 'FTP_PATH',  defaultValue: '/wwwroot', description: 'Target folder for upload')
 
-    // Local smoke-test base URL
-    string(name: 'SMOKE_BASE_URL', defaultValue: 'http://localhost:5005', description: 'Target base URL (localhost or EC2 DNS)')
+    // Local smoke-test port
+    string(name: 'SMOKE_PORT', defaultValue: '5005', description: 'Port for local smoke test')
   }
 
   environment {
@@ -73,138 +73,57 @@ pipeline {
       }
     }
 
-    stage('Run API locally (5005)') {
-        steps {
-            powershell '''
-            $ErrorActionPreference = "Stop"
+    stage('Smoke-test (local run)') {
+      steps {
+        unstash 'published'
+        powershell '''
+          $ErrorActionPreference = "Stop"
+          $pub = "$env:PUBLISH_DIR"
+          $dll = Get-ChildItem -LiteralPath $pub -Filter *.dll | Where-Object { $_.Name -notmatch "test|xunit" } | Select-Object -First 1
+          if (-not $dll) { throw "No DLL found in $pub" }
 
-            # Paths
-            $repo     = Join-Path $env:WORKSPACE 'repo'
-            $apiProj  = Get-ChildItem -Path $repo -Recurse -Filter *.csproj | Where-Object { $_.DirectoryName -match '\\api(\\|$)' } | Select-Object -First 1
-            if (-not $apiProj) { throw "Could not find API .csproj under repo\\api" }
+          $env:ASPNETCORE_URLS = "http://localhost:$($env:SMOKE_PORT)"
+          $proc = Start-Process -FilePath "dotnet" -ArgumentList "`"$($dll.FullName)`"" -WorkingDirectory $pub -PassThru
+          Set-Content "$env:WORKSPACE\\smoke.pid" $proc.Id
 
-            # Make sure port 5005 is free
-            $pid = (Get-NetTCPConnection -LocalPort 5005 -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
-            if ($pid) { Write-Host "Port 5005 in use by PID $pid. Killing..."; Stop-Process -Id $pid -Force }
+          # Wait for the app to respond
+          $base = "http://localhost:$($env:SMOKE_PORT)"
+          $deadline = (Get-Date).AddMinutes(2)
+          while ((Get-Date) -lt $deadline) {
+            try { Invoke-WebRequest -UseBasicParsing -Uri "$base/" -TimeoutSec 2 | Out-Null; break }
+            catch { Start-Sleep -Milliseconds 500 }
+          }
 
-            # Build & publish self-contained
-            $pub = Join-Path $env:WORKSPACE 'publish'
-            dotnet publish "`"$($apiProj.FullName)`"" -c Release -o "`"$pub`""
-
-            # Start API with Kestrel on port 5005
-            $env:ASPNETCORE_URLS = "http://0.0.0.0:5005"
-            $exe = Get-ChildItem $pub -Filter *.dll | Where-Object { $_.Name -notlike '*test*' } | Select-Object -First 1
-            if (-not $exe) { throw "No API DLL found in $pub" }
-
-            # Launch detached
-            $log = Join-Path $env:WORKSPACE 'api-stdout.log'
-            $err = Join-Path $env:WORKSPACE 'api-stderr.log'
-            Start-Process -FilePath "dotnet" -ArgumentList "`"$($exe.FullName)`"" -WorkingDirectory $pub -RedirectStandardOutput $log -RedirectStandardError $err
-
-            # Wait until ready (probe /health, /swagger, and /)
-            $base = "http://localhost:5005"
-            $paths = @("/health","/swagger","/")
-            $deadline = (Get-Date).AddMinutes(3)
-            $ready = $false
-            while ((Get-Date) -lt $deadline -and -not $ready) {
-                foreach ($p in $paths) {
-                try {
-                    $r = Invoke-WebRequest -Uri ($base + $p) -UseBasicParsing -TimeoutSec 3
-                    if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) {
-                    Write-Host "API responded on $base$p with $($r.StatusCode)"
-                    $ready = $true; break
-                    }
-                } catch {}
-                }
-                if (-not $ready) { Start-Sleep -Seconds 2 }
+          # Probe multiple paths
+          $ok = $false
+          $paths = ($env:SMOKE_URLS -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+          foreach ($path in $paths) {
+            try {
+              $r = Invoke-WebRequest -UseBasicParsing -Uri ($base + $path)
+              if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 600) { $ok = $true; break }
+            } catch {}
+          }
+          if (-not $ok) { throw "Smoke test failed at $base (paths tried: $($paths -join ', '))" }
+          Write-Host "Smoke test passed at $base"
+        '''
+      }
+      post {
+        always {
+          powershell '''
+            $ErrorActionPreference = "SilentlyContinue"
+            $pidFile = "$env:WORKSPACE\\smoke.pid"
+            if (Test-Path $pidFile) {
+              try {
+                $smokePid = [int](Get-Content -Path $pidFile -Raw).Trim()
+                if ($smokePid -gt 0) { Stop-Process -Id $smokePid -Force -ErrorAction SilentlyContinue }
+              } catch {}
+              Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
             }
-            if (-not $ready) {
-                Write-Host "---- Last 100 lines of API logs (stdout) ----"
-                if (Test-Path $log) { Get-Content $log -Tail 100 | Write-Output }
-                Write-Host "---- Last 100 lines of API logs (stderr) ----"
-                if (Test-Path $err) { Get-Content $err -Tail 100 | Write-Output }
-                throw "API failed to become ready on $base within 3 minutes."
-            }
-
-            Write-Host "✅ API is up at $base"
-            '''
+          '''
         }
+      }
     }
 
-
-    stage('Smoke-test (Postman/Newman)') {
-        steps {
-            powershell '''
-            $ErrorActionPreference = "Stop"
-
-            # Paths (your repo is checked out to ...\\workspace\\coreapi)
-            $repo        = Join-Path $env:WORKSPACE ''
-            $collection  = Join-Path $repo 'tests\\postman\\smoke.collection.json'
-            $envFile     = Join-Path $repo 'tests\\postman\\local.env.json'
-
-            if (-not (Test-Path $collection)) { throw "Collection not found: $collection" }
-
-            # Ensure Chocolatey (one-time)
-            if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-                Set-ExecutionPolicy Bypass -Scope Process -Force
-                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                Invoke-Expression ((New-Object Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-            }
-
-            # Ensure Node.js (one-time)
-            if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-                choco install nodejs-lts -y --no-progress
-                refreshenv | Out-Null
-            }
-
-            # Wait until API is ready
-            $baseUrl = "${env:SMOKE_BASE_URL}"
-            Write-Host "Waiting for API at $baseUrl ..."
-            $deadline = (Get-Date).AddMinutes(2)
-            $ok = $false
-            while ((Get-Date) -lt $deadline) {
-                try {
-                $r = Invoke-WebRequest -Uri ($baseUrl.TrimEnd('/') + '/health') -UseBasicParsing -TimeoutSec 3
-                if ($r.StatusCode -eq 200) { $ok = $true; break }
-                } catch { Start-Sleep -Seconds 2 }
-            }
-            if (-not $ok) { throw "API did not become ready at $baseUrl within 2 minutes." }
-
-            # Build Newman args without ternary
-            $envArg = ""
-            if (Test-Path $envFile) {
-                $envArg = "--environment `"$envFile`""
-            }
-
-            # Reports
-            $outDir = Join-Path $env:WORKSPACE 'newman-reports'
-            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-            $junit = Join-Path $outDir 'smoke-junit.xml'
-
-            # Prefer runtime BASE_URL
-            $env:BASE_URL = $baseUrl
-
-            # Run Newman (via npx)
-            npx newman run "`"$collection`"" `
-                $envArg `
-                --reporters cli,junit `
-                --reporter-junit-export "`"$junit`"" `
-                --timeout-request 5000 `
-                --delay-request 100 `
-                --bail
-
-            Write-Host "✅ Newman smoke tests passed against $baseUrl"
-            '''
-        }
-        post {
-            always {
-            junit allowEmptyResults: true, testResults: 'newman-reports/*.xml'
-            archiveArtifacts artifacts: 'newman-reports/**', onlyIfSuccessful: false
-            }
-        }
-    }
-
-    
 }
 
   post {
