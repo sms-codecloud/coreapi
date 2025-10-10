@@ -25,13 +25,6 @@ pipeline {
     string(name: 'SMOKE_PORT', defaultValue: '5005', description: 'Port for local smoke test')
   }
 
-#   environment {
-#     DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
-#     DOTNET_NOLOGO = '1'
-#     PUBLISH_DIR = "${env.WORKSPACE}\\publish"
-#     MSDEPLOY_EXE = 'C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe'
-#   }
-
   environment {
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
     DOTNET_NOLOGO = '1'
@@ -40,7 +33,7 @@ pipeline {
     WORKSPACE = 'D:\\jenkins-workspace\\workspace\\coreapi'
     PUBLISH_DIR = "${env.WORKSPACE}\\publish"
     MSDEPLOY_EXE = 'C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe'
-`}
+}
 
   stages {
 
@@ -68,23 +61,23 @@ pipeline {
     }
 
     stage('Publish (Release folder)') {
-    steps {
-        bat '''
-        if not exist project.path (
-            echo ERROR: project.path not found — build stage failed or was skipped
-            exit /b 1
-        )
-        set /p CSPROJ=<project.path
+        steps {
+            bat '''
+            if not exist project.path (
+                echo ERROR: project.path not found — build stage failed or was skipped
+                exit /b 1
+            )
+            set /p CSPROJ=<project.path
 
-        if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
-        mkdir "%PUBLISH_DIR%"
+            if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
+            mkdir "%PUBLISH_DIR%"
 
-        dotnet publish "%CSPROJ%" -c "%CONFIGURATION%" -o "%PUBLISH_DIR%" --no-build
-        if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
-        dir "%PUBLISH_DIR%"
-        '''
-        stash name: 'published', includes: 'publish/**'
-    }
+            dotnet publish "%CSPROJ%" -c "%CONFIGURATION%" -o "%PUBLISH_DIR%" --no-build
+            if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+            dir "%PUBLISH_DIR%"
+            '''
+            stash name: 'published', includes: 'publish/**'
+        }
     }
 
 
