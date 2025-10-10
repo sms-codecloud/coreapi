@@ -73,55 +73,94 @@ pipeline {
     }
 
     stage('Smoke-test (local run)') {
-      steps {
-        unstash 'published'
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          $pub = "$env:PUBLISH_DIR"
-          $dll = Get-ChildItem -LiteralPath $pub -Filter *.dll | Where-Object { $_.Name -notmatch "test|xunit" } | Select-Object -First 1
-          if (-not $dll) { throw "No DLL found in $pub" }
+        steps {
+            unstash 'published'
+            powershell '''
+            $ErrorActionPreference = "Stop"
+            $pub = "$env:PUBLISH_DIR"
+            $dll = Get-ChildItem -LiteralPath $pub -Filter *.dll | Where-Object { $_.Name -notmatch "test|xunit" } | Select-Object -First 1
+            if (-not $dll) { throw "No DLL found in $pub" }
 
-          $env:ASPNETCORE_URLS = "http://localhost:$($env:SMOKE_PORT)"
-          $proc = Start-Process -FilePath "dotnet" -ArgumentList "`"$($dll.FullName)`"" -WorkingDirectory $pub -PassThru
-          Set-Content "$env:WORKSPACE\\smoke.pid" $proc.Id
+            # Start the app
+            $env:ASPNETCORE_URLS = "http://localhost:$($env:SMOKE_PORT)"
+            $proc = Start-Process -FilePath "dotnet" -ArgumentList "`"$($dll.FullName)`"" -WorkingDirectory $pub -PassThru
+            Set-Content "$env:WORKSPACE\\smoke.pid" $proc.Id
 
-          # Wait for the app to respond
-          $base = "http://localhost:$($env:SMOKE_PORT)"
-          $deadline = (Get-Date).AddMinutes(2)
-          while ((Get-Date) -lt $deadline) {
-            try { Invoke-WebRequest -UseBasicParsing -Uri "$base/" -TimeoutSec 2 | Out-Null; break }
-            catch { Start-Sleep -Milliseconds 500 }
-          }
-
-          # Probe multiple paths
-          $ok = $false
-          $paths = ($env:SMOKE_URLS -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-          foreach ($path in $paths) {
-            try {
-              $r = Invoke-WebRequest -UseBasicParsing -Uri ($base + $path)
-              if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 600) { $ok = $true; break }
-            } catch {}
-          }
-          if (-not $ok) { throw "Smoke test failed at $base (paths tried: $($paths -join ', '))" }
-          Write-Host "Smoke test passed at $base"
-        '''
-      }
-      post {
-        always {
-          powershell '''
-            $ErrorActionPreference = "SilentlyContinue"
-            $pidFile = "$env:WORKSPACE\\smoke.pid"
-            if (Test-Path $pidFile) {
-              try {
-                $smokePid = [int](Get-Content -Path $pidFile -Raw).Trim()
-                if ($smokePid -gt 0) { Stop-Process -Id $smokePid -Force -ErrorAction SilentlyContinue }
-              } catch {}
-              Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
+            # Wait until it responds
+            $base = "http://localhost:$($env:SMOKE_PORT)"
+            $deadline = (Get-Date).AddMinutes(2)
+            while ((Get-Date) -lt $deadline) {
+                try { Invoke-WebRequest -UseBasicParsing -Uri "$base/" -TimeoutSec 2 | Out-Null; break }
+                catch { Start-Sleep -Milliseconds 500 }
             }
-          '''
+
+            # Probe list
+            $paths = ($env:SMOKE_URLS -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            $results = @()
+            foreach ($path in $paths) {
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                $code = $null; $ok = $false; $bytes = $null; $err = $null
+                try {
+                $r = Invoke-WebRequest -UseBasicParsing -Uri ($base + $path) -TimeoutSec 10
+                $code  = [int]$r.StatusCode
+                $bytes = $r.RawContentLength
+                $ok = $true
+                } catch {
+                # Try to extract HTTP code from the exception (may be null on connect errors)
+                try { $code = [int]$_.Exception.Response.StatusCode } catch { $code = $null }
+                $err = ($_.Exception.Message -replace "`r|`n"," ")
+                } finally { $sw.Stop() }
+
+                $results += [pscustomobject]@{
+                Path   = $path
+                Url    = ($base + $path)
+                Status = if ($code) { $code } else { 'N/A' }
+                Ms     = $sw.ElapsedMilliseconds
+                Bytes  = if ($bytes) { $bytes } else { 0 }
+                Error  = $err
+                }
+            }
+
+            # Console summary
+            Write-Host "---- Smoke Test Results ----"
+            $results | ForEach-Object {
+                $line = "{0,-16} {1,-6} {2,6} ms {3,8} bytes  {4}" -f $_.Path, $_.Status, $_.Ms, $_.Bytes, $_.Error
+                Write-Host $line
+            }
+
+            # Save artifacts
+            $csv = "$env:WORKSPACE\\smoke-results.csv"
+            $json = "$env:WORKSPACE\\smoke-results.json"
+            $results | Export-Csv -NoTypeInformation -Path $csv -Encoding UTF8
+            $results | ConvertTo-Json -Depth 4 | Out-File -FilePath $json -Encoding UTF8
+
+            # Fail if all probes failed
+            if (-not ($results | Where-Object { $_.Status -ne 'N/A' -and [int]$_.Status -ge 200 -and [int]$_.Status -lt 600 })) {
+                throw "Smoke test failed: no endpoints responded."
+            }
+
+            Write-Host "Smoke test passed at $base"
+            '''
         }
-      }
+        post {
+            always {
+            // stop app (your existing cleanup) + archive the report files
+            powershell '''
+                $ErrorActionPreference = "SilentlyContinue"
+                $pidFile = "$env:WORKSPACE\\smoke.pid"
+                if (Test-Path $pidFile) {
+                try {
+                    $smokePid = [int](Get-Content -Path $pidFile -Raw).Trim()
+                    if ($smokePid -gt 0) { Stop-Process -Id $smokePid -Force -ErrorAction SilentlyContinue }
+                } catch {}
+                Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
+                }
+            '''
+            archiveArtifacts artifacts: 'smoke-results.*', fingerprint: true
+            }
+        }
     }
+
 }
 
   post {
