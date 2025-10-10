@@ -52,7 +52,7 @@ namespace ARJAPIADo.DataAccess
                     {
                         employee = new Employee
                         {
-                            EmployeeId = reader.GetInt32(0),
+                            EmployeeId = reader.GetInt64(0),
                             FirstName = reader.GetString(1),
                             LastName = reader.GetString(2),
                             PhoneNo = reader.GetString(3),
@@ -92,7 +92,7 @@ namespace ARJAPIADo.DataAccess
         {
             using (var connection = new SqlConnection(_connectionString))
             {
-                var command = new SqlCommand("UPDATE Employees SET FirstName = @FirstName, LastName = @LastName, PhoneNo = @PhoneNo, Email = @Email, Address = @Address WHERE ProductId = @ProductId", connection);
+                var command = new SqlCommand("UPDATE Employees SET FirstName = @FirstName, LastName = @LastName, PhoneNo = @PhoneNo, Email = @Email, Address = @Address WHERE EmployeeId = @EmployeeId", connection);
                 command.Parameters.AddWithValue("@EmployeeId", employee.EmployeeId);
                 command.Parameters.AddWithValue("@FirstName", employee.FirstName);
                 command.Parameters.AddWithValue("@LastName", employee.LastName);

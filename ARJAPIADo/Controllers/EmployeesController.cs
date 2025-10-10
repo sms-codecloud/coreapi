@@ -26,16 +26,17 @@ namespace ARJAPIADo.Controllers
         }
 
         //// GET api/Products/5
-        //[HttpGet("{id}")]
-        //public ActionResult<Employee> Get(int id)
-        //{
-        //    var product = _employeeRepository.GetEmployeeById(id);
-        //    if (product == null)
-        //    {
-        //        return NotFound();
-        //    }
-        //    return Ok(product);
-        //}
+        [HttpGet]
+        [Route("api/EmployeeById/{id}")]
+        public ActionResult<Employee> Get(int id)
+        {
+            var product = _employeeRepository.GetEmployeeById(id);
+            if (product == null)
+            {
+                return NotFound();
+            }
+            return Ok(product);
+        }
 
         // POST api/Products
         [HttpPost]
@@ -67,7 +68,7 @@ namespace ARJAPIADo.Controllers
 
         ////// DELETE api/Products/5
         [HttpPost]
-        [Route("api/EmployeeDelete/id")]
+        [Route("api/EmployeeDelete/{id}")]
         public ActionResult Delete(int id)
         {
             _employeeRepository.DeleteEmployee(id);
