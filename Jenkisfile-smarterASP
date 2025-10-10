@@ -3,21 +3,16 @@ pipeline {
   options { disableConcurrentBuilds(); timestamps(); ansiColor('xterm') }
 
   parameters {
-    // Build configuration
     string(name: 'CONFIGURATION', defaultValue: 'Release', description: 'Build configuration (Debug/Release)')
+    string(name: 'SMOKE_URLS',    defaultValue: '/,/swagger', description: 'Comma-separated paths to test locally')
+    choice(name:  'DEPLOY_METHOD', choices: ['WEBDEPLOY','FTP'], description: 'Choose deployment method')
 
-    // Smoke-test
-    string(name: 'SMOKE_URLS', defaultValue: '/,/swagger', description: 'Comma-separated paths to test locally')
-
-    // Deployment method
-    choice(name: 'DEPLOY_METHOD', choices: ['WEBDEPLOY','FTP'], description: 'Choose deployment method')
-
-    // Web Deploy info (from SmarterASP.NET control panel → VS WebDeploy)
-    string(name: 'SITE_NAME', defaultValue: 'your-site-name', description: 'IIS Site name shown in control panel')
+    // Web Deploy (from SmarterASP.NET control panel → VS WebDeploy)
+    string(name: 'SITE_NAME', defaultValue: 'your-site-name', description: 'IIS Site name in control panel')
     string(name: 'WD_SERVER', defaultValue: 'webdeploy.smarterasp.net', description: 'Web Deploy server host')
     string(name: 'WD_PORT',   defaultValue: '8172', description: 'Web Deploy port (usually 8172)')
 
-    // FTP fallback (from SmarterASP.NET control panel → FTP section)
+    // FTP fallback
     string(name: 'FTP_HOST',  defaultValue: 'ftp.smarterasp.net', description: 'FTP host')
     string(name: 'FTP_PATH',  defaultValue: '/wwwroot', description: 'Target folder for upload')
 
@@ -28,58 +23,55 @@ pipeline {
   environment {
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
     DOTNET_NOLOGO = '1'
-    // Default workspace : D:\jenkins-slave\workspace\
-    // Explicit workspace base path on your local machine
-    WORKSPACE = 'D:\\jenkins-workspace\\workspace\\coreapi'
+    // Do NOT override WORKSPACE; Jenkins sets it.
     PUBLISH_DIR = "${env.WORKSPACE}\\publish"
     MSDEPLOY_EXE = 'C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe'
-}
+  }
 
   stages {
+    // SCM checkout handled by jobs SCM config
 
-    // GIT CHECKOUT is handled by Jenkins job SCM configuration.
     stage('Restore & Build') {
-    steps {
+      steps {
         bat '''
-        @echo on
-        where dotnet || (echo ERROR: .NET SDK not found & exit /b 1)
+          @echo on
+          where dotnet || (echo ERROR: .NET SDK not found & exit /b 1)
 
-        for /f "usebackq delims=" %%f in (`powershell -NoP -C "(Get-ChildItem -Recurse -Filter *.csproj | Select-Object -First 1).FullName"`) do (
+          for /f "usebackq delims=" %%f in (`powershell -NoP -C "(Get-ChildItem -Recurse -Filter *.csproj | Select-Object -First 1).FullName"`) do (
             echo %%f > project.path
-        )
-        if not exist project.path (
+          )
+          if not exist project.path (
             echo ERROR: No .csproj found
             exit /b 1
-        )
-        set /p CSPROJ=<project.path
-        echo Found project: %CSPROJ%
+          )
+          set /p CSPROJ=<project.path
+          echo Found project: %CSPROJ%
 
-        dotnet restore "%CSPROJ%"
-        dotnet build "%CSPROJ%" -c "%CONFIGURATION%"
+          dotnet restore "%CSPROJ%"
+          dotnet build   "%CSPROJ%" -c "%CONFIGURATION%"
         '''
-    }
+      }
     }
 
     stage('Publish (Release folder)') {
-        steps {
-            bat '''
-            if not exist project.path (
-                echo ERROR: project.path not found — build stage failed or was skipped
-                exit /b 1
-            )
-            set /p CSPROJ=<project.path
+      steps {
+        bat '''
+          if not exist project.path (
+            echo ERROR: project.path not found - build stage failed or was skipped
+            exit /b 1
+          )
+          set /p CSPROJ=<project.path
 
-            if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
-            mkdir "%PUBLISH_DIR%"
+          if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
+          mkdir "%PUBLISH_DIR%"
 
-            dotnet publish "%CSPROJ%" -c "%CONFIGURATION%" -o "%PUBLISH_DIR%" --no-build
-            if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
-            dir "%PUBLISH_DIR%"
-            '''
-            stash name: 'published', includes: 'publish/**'
-        }
+          dotnet publish "%CSPROJ%" -c "%CONFIGURATION%" -o "%PUBLISH_DIR%" --no-build
+          if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+          dir "%PUBLISH_DIR%"
+        '''
+        stash name: 'published', includes: 'publish/**'
+      }
     }
-
 
     stage('Smoke-test (local run)') {
       steps {
@@ -104,92 +96,141 @@ pipeline {
 
           # Probe multiple paths
           $ok = $false
-          $paths = ($env:SMOKE_URLS -split ",") | ForEach-Object { $_.Trim() }
+          $paths = ($env:SMOKE_URLS -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
           foreach ($path in $paths) {
             try {
               $r = Invoke-WebRequest -UseBasicParsing -Uri ($base + $path)
               if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 600) { $ok = $true; break }
             } catch {}
           }
-          if (-not $ok) { throw "Smoke test failed at $base (paths: $($paths -join ', '))" }
+          if (-not $ok) { throw "Smoke test failed at $base (paths tried: $($paths -join ', '))" }
           Write-Host "Smoke test passed at $base"
         '''
       }
       post {
         always {
+          powershell '''
             $ErrorActionPreference = "SilentlyContinue"
-            $pidFile = "$env:WORKSPACE\smoke.pid"
+            $pidFile = "$env:WORKSPACE\\smoke.pid"
             if (Test-Path $pidFile) {
-            try {
+              try {
                 $smokePid = [int](Get-Content -Path $pidFile -Raw).Trim()
-                if ($smokePid -gt 0) {
-                Stop-Process -Id $smokePid -Force -ErrorAction SilentlyContinue
-                }
-            } catch { }
-            Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
+                if ($smokePid -gt 0) { Stop-Process -Id $smokePid -Force -ErrorAction SilentlyContinue }
+              } catch {}
+              Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
             }
+          '''
         }
       }
     }
 
-    stage('Deploy') {
-      steps {
-        unstash 'published'
-        script {
-          if (params.DEPLOY_METHOD == 'WEBDEPLOY') {
-            withCredentials([string(credentialsId: 'SMARTER_ACCOUNT', variable: 'SMARTER_ACCOUNT')]) {
-              bat """
-                @echo on
-                if not exist "%MSDEPLOY_EXE%" (
-                  echo ERROR: msdeploy not found at "%MSDEPLOY_EXE%"
-                  echo Install Web Deploy 3.x on this agent.
-                  exit /b 1
-                )
+    # stage('Deploy') {
+    #     steps {
+    #         unstash 'published'
+    #         script {
+    #         if (params.DEPLOY_METHOD == 'WEBDEPLOY') {
+    #             withCredentials([string(credentialsId: 'SMARTER_ACCOUNT', variable: 'SMARTER_ACCOUNT')]) {
+    #             powershell '''
+    #                 $ErrorActionPreference = "Stop"
 
-                for /f "tokens=1,2 delims=:" %%a in ("%SMARTER_ACCOUNT%") do (
-                  set WD_USER=%%a
-                  set WD_PASS=%%b
-                )
-                if "%WD_USER%"=="" (echo ERROR: SMARTER_ACCOUNT must be 'username:password' & exit /b 1)
+    #                 # Validate msdeploy
+    #                 $msdeploy = "${env:MSDEPLOY_EXE}"
+    #                 if (-not (Test-Path $msdeploy)) {
+    #                 throw "msdeploy not found at $msdeploy. Install Web Deploy 3.x on this agent."
+    #                 }
 
-                set WD_URL=https://%WD_SERVER%:%WD_PORT%/MsDeploy.axd?site=%SITE_NAME%
+    #                 # Split only on the FIRST colon to tolerate ':' inside passwords
+    #                 $raw = $env:SMARTER_ACCOUNT
+    #                 $idx = $raw.IndexOf(':')
+    #                 if ($idx -lt 1) { throw "SMARTER_ACCOUNT must be 'username:password'." }
+    #                 $wdUser = $raw.Substring(0, $idx)
+    #                 $wdPass = $raw.Substring($idx + 1)
 
-                "%MSDEPLOY_EXE%" -verb:sync ^
-                  -source:iisApp="%PUBLISH_DIR%" ^
-                  -dest:iisApp="%SITE_NAME%",ComputerName="%WD_URL%",UserName="%WD_USER%",Password="%WD_PASS%",AuthType=Basic,IncludeAcls=False ^
-                  -enableRule:AppOffline ^
-                  -retryAttempts:5 -retryInterval:2000
+    #                 $site   = $env:SITE_NAME
+    #                 $server = $env:WD_SERVER
+    #                 $port   = $env:WD_PORT
+    #                 $pub    = $env:PUBLISH_DIR
 
-                if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
-              """
-            }
-          } else {
-            withCredentials([string(credentialsId: 'SMARTER_ACCOUNT', variable: 'SMARTER_ACCOUNT')]) {
-              bat """
-                @echo on
-                for /f "tokens=1,2 delims=:" %%a in ("%SMARTER_ACCOUNT%") do (
-                  set FTP_USER=%%a
-                  set FTP_PASS=%%b
-                )
-                if "%FTP_USER%"=="" (echo ERROR: SMARTER_ACCOUNT must be 'username:password' & exit /b 1)
+    #                 if (-not (Test-Path $pub)) { throw "Publish folder not found: $pub" }
 
-                powershell -NoProfile -Command ^
-                  "$ErrorActionPreference='Stop';" ^
-                  "$pub='${env.PUBLISH_DIR}';" ^
-                  "$uri='ftp://${params.FTP_HOST}${params.FTP_PATH.Replace('\\','/')}';" ^
-                  "$cred=New-Object System.Net.NetworkCredential('%FTP_USER%','%FTP_PASS%');" ^
-                  "Get-ChildItem -LiteralPath $pub -Recurse | Where-Object { -not $_.PsIsContainer } | ForEach-Object {" ^
-                    "$rel=$_.FullName.Substring($pub.Length).Replace('\\','/');" ^
-                    "$target=$uri + $rel;" ^
-                    "$wc = New-Object System.Net.WebClient; $wc.Credentials=$cred; $wc.UploadFile([Uri]$target, 'STOR', $_.FullName) | Out-Null;" ^
-                  "}"
-              """
-            }
-          }
-        }
-      }
-    }
-  }
+    #                 $wdUrl = "https://$server`:$port/MsDeploy.axd?site=$site"
+
+    #                 # Use contentPath (local folder) -> iisApp (remote site)
+    #                 $args = @(
+    #                 '-verb:sync',
+    #                 ("-source:contentPath=""{0}""" -f $pub),
+    #                 ("-dest:iisApp=""{0}"",ComputerName=""{1}"",UserName=""{2}"",Password=""{3}"",AuthType=Basic,IncludeAcls=False" -f $site,$wdUrl,$wdUser,$wdPass),
+    #                 '-enableRule:AppOffline',
+    #                 '-retryAttempts:5',
+    #                 '-retryInterval:2000'
+    #                 )
+
+    #                 Write-Host "Invoking msdeploy -> $wdUrl (site=$site)"
+    #                 $p = Start-Process -FilePath $msdeploy -ArgumentList $args -NoNewWindow -PassThru -Wait
+    #                 if ($p.ExitCode -ne 0) { throw "msdeploy failed with exit code $($p.ExitCode)" }
+    #             '''
+    #             }
+    #         } else {
+    #             withCredentials([string(credentialsId: 'SMARTER_ACCOUNT', variable: 'SMARTER_ACCOUNT')]) {
+    #             powershell '''
+    #                 $ErrorActionPreference = "Stop"
+
+    #                 # Split only first colon
+    #                 $raw = $env:SMARTER_ACCOUNT
+    #                 $idx = $raw.IndexOf(':')
+    #                 if ($idx -lt 1) { throw "SMARTER_ACCOUNT must be 'username:password'." }
+    #                 $ftpUser = $raw.Substring(0, $idx)
+    #                 $ftpPass = $raw.Substring($idx + 1)
+
+    #                 $pub  = $env:PUBLISH_DIR
+    #                 $host = $env:FTP_HOST
+    #                 $path = ($env:FTP_PATH).Replace('\','/')
+    #                 if (-not (Test-Path $pub)) { throw "Publish folder not found: $pub" }
+
+    #                 $baseUri = "ftp://$host$path"
+
+    #                 function Ensure-FtpDir {
+    #                 param([string]$Uri,[System.Net.ICredentials]$Cred)
+    #                 $parts = ([Uri]$Uri).AbsolutePath.Trim('/') -split '/'
+    #                 $prefix = "ftp://$host/"
+    #                 $accum = $prefix
+    #                 foreach ($p in $parts) {
+    #                     if ([string]::IsNullOrWhiteSpace($p)) { continue }
+    #                     $accum = $accum + $p + '/'
+    #                     try {
+    #                     $req = [System.Net.FtpWebRequest]::Create($accum)
+    #                     $req.Method = [System.Net.WebRequestMethods+Ftp]::MakeDirectory
+    #                     $req.Credentials = $Cred
+    #                     $req.UseBinary = $true
+    #                     $req.KeepAlive = $false
+    #                     $req.GetResponse().Dispose()
+    #                     } catch { }  # ignore if exists
+    #                 }
+    #                 }
+
+    #                 $cred = New-Object System.Net.NetworkCredential($ftpUser,$ftpPass)
+
+    #                 Get-ChildItem -LiteralPath $pub -Recurse | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
+    #                 $rel = $_.FullName.Substring($pub.Length).TrimStart('\').Replace('\','/')
+    #                 $target = "$baseUri/$rel"
+    #                 $dirUri = $target.Substring(0, $target.LastIndexOf('/'))
+
+    #                 Ensure-FtpDir -Uri $dirUri -Cred $cred
+
+    #                 $wc = New-Object System.Net.WebClient
+    #                 $wc.Credentials = $cred
+    #                 $wc.UploadFile([Uri]$target, 'STOR', $_.FullName) | Out-Null
+    #                 }
+
+    #                 Write-Host "FTP deploy complete to $baseUri"
+    #             '''
+    #             }
+    #         }
+    #         }
+    #     }
+    # }
+
+}
 
   post {
     success { echo '✅ Build, smoke-test, and deployment completed successfully.' }
