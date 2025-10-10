@@ -36,33 +36,47 @@ pipeline {
 
     // GIT CHECKOUT is handled by Jenkins job SCM configuration.
     stage('Restore & Build') {
-      steps {
+    steps {
         bat '''
-          @echo on
-          where dotnet || (echo ERROR: .NET SDK not found & exit /b 1)
+        @echo on
+        where dotnet || (echo ERROR: .NET SDK not found & exit /b 1)
 
-          for /f "usebackq delims=" %%f in (`powershell -NoP -C "(Get-ChildItem -Recurse -Filter *.csproj | Select-Object -First 1).FullName"`) do set CSPROJ=%%f
-          if "%CSPROJ%"=="" (echo ERROR: No .csproj found & exit /b 1)
-          echo Found project: %CSPROJ%
+        for /f "usebackq delims=" %%f in (`powershell -NoP -C "(Get-ChildItem -Recurse -Filter *.csproj | Select-Object -First 1).FullName"`) do (
+            echo %%f > project.path
+        )
+        if not exist project.path (
+            echo ERROR: No .csproj found
+            exit /b 1
+        )
+        set /p CSPROJ=<project.path
+        echo Found project: %CSPROJ%
 
-          dotnet restore "%CSPROJ%"
-          dotnet build "%CSPROJ%" -c "%CONFIGURATION%"
+        dotnet restore "%CSPROJ%"
+        dotnet build "%CSPROJ%" -c "%CONFIGURATION%"
         '''
-      }
+    }
     }
 
     stage('Publish (Release folder)') {
-      steps {
+    steps {
         bat '''
-          if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
-          mkdir "%PUBLISH_DIR%"
-          dotnet publish "%CSPROJ%" -c "%CONFIGURATION%" -o "%PUBLISH_DIR%" --no-build
-          if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
-          dir "%PUBLISH_DIR%"
+        if not exist project.path (
+            echo ERROR: project.path not found — build stage failed or was skipped
+            exit /b 1
+        )
+        set /p CSPROJ=<project.path
+
+        if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
+        mkdir "%PUBLISH_DIR%"
+
+        dotnet publish "%CSPROJ%" -c "%CONFIGURATION%" -o "%PUBLISH_DIR%" --no-build
+        if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+        dir "%PUBLISH_DIR%"
         '''
         stash name: 'published', includes: 'publish/**'
-      }
     }
+    }
+
 
     stage('Smoke-test (local run)') {
       steps {
