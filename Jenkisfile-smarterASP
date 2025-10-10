@@ -73,6 +73,65 @@ pipeline {
       }
     }
 
+    stage('Run API locally (5005)') {
+        steps {
+            powershell '''
+            $ErrorActionPreference = "Stop"
+
+            # Paths
+            $repo     = Join-Path $env:WORKSPACE 'repo'
+            $apiProj  = Get-ChildItem -Path $repo -Recurse -Filter *.csproj | Where-Object { $_.DirectoryName -match '\\api(\\|$)' } | Select-Object -First 1
+            if (-not $apiProj) { throw "Could not find API .csproj under repo\\api" }
+
+            # Make sure port 5005 is free
+            $pid = (Get-NetTCPConnection -LocalPort 5005 -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+            if ($pid) { Write-Host "Port 5005 in use by PID $pid. Killing..."; Stop-Process -Id $pid -Force }
+
+            # Build & publish self-contained
+            $pub = Join-Path $env:WORKSPACE 'publish'
+            dotnet publish "`"$($apiProj.FullName)`"" -c Release -o "`"$pub`""
+
+            # Start API with Kestrel on port 5005
+            $env:ASPNETCORE_URLS = "http://0.0.0.0:5005"
+            $exe = Get-ChildItem $pub -Filter *.dll | Where-Object { $_.Name -notlike '*test*' } | Select-Object -First 1
+            if (-not $exe) { throw "No API DLL found in $pub" }
+
+            # Launch detached
+            $log = Join-Path $env:WORKSPACE 'api-stdout.log'
+            $err = Join-Path $env:WORKSPACE 'api-stderr.log'
+            Start-Process -FilePath "dotnet" -ArgumentList "`"$($exe.FullName)`"" -WorkingDirectory $pub -RedirectStandardOutput $log -RedirectStandardError $err
+
+            # Wait until ready (probe /health, /swagger, and /)
+            $base = "http://localhost:5005"
+            $paths = @("/health","/swagger","/")
+            $deadline = (Get-Date).AddMinutes(3)
+            $ready = $false
+            while ((Get-Date) -lt $deadline -and -not $ready) {
+                foreach ($p in $paths) {
+                try {
+                    $r = Invoke-WebRequest -Uri ($base + $p) -UseBasicParsing -TimeoutSec 3
+                    if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) {
+                    Write-Host "API responded on $base$p with $($r.StatusCode)"
+                    $ready = $true; break
+                    }
+                } catch {}
+                }
+                if (-not $ready) { Start-Sleep -Seconds 2 }
+            }
+            if (-not $ready) {
+                Write-Host "---- Last 100 lines of API logs (stdout) ----"
+                if (Test-Path $log) { Get-Content $log -Tail 100 | Write-Output }
+                Write-Host "---- Last 100 lines of API logs (stderr) ----"
+                if (Test-Path $err) { Get-Content $err -Tail 100 | Write-Output }
+                throw "API failed to become ready on $base within 3 minutes."
+            }
+
+            Write-Host "✅ API is up at $base"
+            '''
+        }
+    }
+
+
     stage('Smoke-test (Postman/Newman)') {
         steps {
             powershell '''
