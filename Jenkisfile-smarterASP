@@ -25,12 +25,22 @@ pipeline {
     string(name: 'SMOKE_PORT', defaultValue: '5005', description: 'Port for local smoke test')
   }
 
+#   environment {
+#     DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
+#     DOTNET_NOLOGO = '1'
+#     PUBLISH_DIR = "${env.WORKSPACE}\\publish"
+#     MSDEPLOY_EXE = 'C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe'
+#   }
+
   environment {
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
     DOTNET_NOLOGO = '1'
+    # Default workspace : D:\jenkins-slave\workspace\
+    // Explicit workspace base path on your local machine
+    WORKSPACE = 'D:\\jenkins-workspace\\workspace\\coreapi'
     PUBLISH_DIR = "${env.WORKSPACE}\\publish"
     MSDEPLOY_EXE = 'C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe'
-  }
+`}
 
   stages {
 
@@ -114,13 +124,17 @@ pipeline {
       }
       post {
         always {
-          powershell '''
-            if (Test-Path "$env:WORKSPACE\\smoke.pid") {
-              $pid = Get-Content "$env:WORKSPACE\\smoke.pid"
-              try { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } catch {}
-              Remove-Item "$env:WORKSPACE\\smoke.pid" -Force -ErrorAction SilentlyContinue
+            $ErrorActionPreference = "SilentlyContinue"
+            $pidFile = "$env:WORKSPACE\smoke.pid"
+            if (Test-Path $pidFile) {
+            try {
+                $smokePid = [int](Get-Content -Path $pidFile -Raw).Trim()
+                if ($smokePid -gt 0) {
+                Stop-Process -Id $smokePid -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+            Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
             }
-          '''
         }
       }
     }
