@@ -55,7 +55,7 @@ namespace ARJAPIADo.Controllers
 
         //// PUT api/Products/5
         [HttpPost]
-        [Route("api/EmployeeUpdate")]
+        [Route("api/EmployeeUpdate/{id}")]
         public ActionResult Put(int id, [FromBody] Employee employee)
         {
             if (id != employee.EmployeeId)
