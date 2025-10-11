@@ -97,12 +97,12 @@ pipeline {
 
             # --- Run Web Deploy (SmarterASP.NET) ---
             & "$msdeploy" `
-              -source:package="$($pkg.FullName)" `
-              -dest:auto,ComputerName="https://$($env:WD_SERVER):$($env:WD_PORT)/msdeploy.axd?site=$($env:SITE_NAME)", `
-                  UserName="$($env:WD_USER)",Password="$($env:WD_PASS)",AuthType="Basic" `
+              "-source:package=$($pkg.FullName)" `
+              "-dest:auto,ComputerName=https://$($env:WD_SERVER):$($env:WD_PORT)/msdeploy.axd?site=$($env:SITE_NAME),UserName=$($env:WD_USER),Password=$($env:WD_PASS),AuthType=Basic" `
               -allowUntrusted `
               -verb:sync `
               -enableRule:DoNotDeleteRule
+
           }
           elseif ($env:DEPLOY_METHOD -eq 'FTP') {
             # --- Upload via FTP to SmarterASP.NET ---
