@@ -78,7 +78,7 @@ namespace ARJAPIADo.Controllers
         [Route("api/HealthAPI")]
         public ActionResult HealthAPI()
         {
-            return Ok("Runnig");
+            return Ok("Runnig shankar");
         }
 }
 }
