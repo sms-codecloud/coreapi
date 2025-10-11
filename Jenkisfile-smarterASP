@@ -6,13 +6,13 @@ pipeline {
     choice(name:  'DEPLOY_METHOD', choices: ['WEBDEPLOY','FTP'], description: 'Choose deployment method')
 
     // Web Deploy (from SmarterASP.NET control panel → VS WebDeploy)
-    string(name: 'SITE_NAME', defaultValue: 'your-site-name', description: 'IIS Site name in control panel')
-    string(name: 'WD_SERVER', defaultValue: 'webdeploy.smarterasp.net', description: 'Web Deploy server host')
-    string(name: 'WD_PORT',   defaultValue: '8172', description: 'Web Deploy port (usually 8172)')
+    string(name: 'SITE_NAME', defaultValue: 'your-site-name', description: 'Web Deploy - IIS Site name in control panel')
+    string(name: 'WD_SERVER', defaultValue: 'webdeploy.smarterasp.net', description: 'Web Deploy - Web Deploy server host')
+    string(name: 'WD_PORT',   defaultValue: '8172', description: 'Web Deploy - Web Deploy port (usually 8172)')
 
     // FTP fallback
-    string(name: 'FTP_HOST',  defaultValue: 'ftp.smarterasp.net', description: 'FTP host')
-    string(name: 'FTP_PATH',  defaultValue: '/wwwroot', description: 'Target folder for upload')
+    string(name: 'FTP_HOST',  defaultValue: 'ftp.smarterasp.net', description: 'FTP - FTP host')
+    string(name: 'FTP_PATH',  defaultValue: '/wwwroot', description: 'FTP - Target folder for upload')
   }
 
   environment {
