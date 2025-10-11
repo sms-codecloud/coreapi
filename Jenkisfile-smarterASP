@@ -1,242 +1,196 @@
 pipeline {
   agent { label 'win-agent-1' }
+  options { disableConcurrentBuilds(); timestamps(); ansiColor('xterm') }
 
   parameters {
-    string(name: 'CONFIGURATION', defaultValue: 'Release', description: 'Build configuration (Debug/Release)')
-    string(name: 'SMOKE_URLS',    defaultValue: '/,/swagger', description: 'Comma-separated paths to test locally')
-    choice(name:  'DEPLOY_METHOD', choices: ['WEBDEPLOY','FTP'], description: 'Choose deployment method')
-
-    // Web Deploy (from SmarterASP.NET control panel → VS WebDeploy)
-    string(name: 'SITE_NAME', defaultValue: 'your-site-name', description: 'IIS Site name in control panel')
-    string(name: 'WD_SERVER', defaultValue: 'webdeploy.smarterasp.net', description: 'Web Deploy server host')
-    string(name: 'WD_PORT',   defaultValue: '8172', description: 'Web Deploy port (usually 8172)')
-
-    // FTP fallback
-    string(name: 'FTP_HOST',  defaultValue: 'ftp.smarterasp.net', description: 'FTP host')
-    string(name: 'FTP_PATH',  defaultValue: '/wwwroot', description: 'Target folder for upload')
-
-    // Local smoke-test port
-    string(name: 'SMOKE_PORT', defaultValue: '5005', description: 'Port for local smoke test')
+    choice(name: 'DEPLOY_METHOD', choices: ['WebDeploy','FTP'], description: 'Choose how to deploy')
+    // ---- WebDeploy ----
+    string(name: 'WEBDEPLOY_URL',      defaultValue: 'https://publish.smarterasp.net:8172/msdeploy.axd?site=<your-site>', description: 'SmarterASP Web Deploy service URL')
+    string(name: 'IIS_SITE_NAME',      defaultValue: '<your-site>', description: 'SmarterASP site/app name')
+    string(name: 'WEBDEPLOY_CRED_ID',  defaultValue: 'smarterasp-webdeploy', description: 'Jenkins credential ID (Username/Password)')
+    // ---- FTP/FTPS ----
+    string(name: 'FTP_HOST',       defaultValue: 'ftp.smarterasp.net', description: 'FTP/FTPS host')
+    string(name: 'FTP_DIR',        defaultValue: '/wwwroot',           description: 'Remote directory')
+    booleanParam(name: 'FTPS',         defaultValue: true,  description: 'Use FTPS (Explicit TLS)')
+    booleanParam(name: 'FTP_PASSIVE',  defaultValue: true,  description: 'Passive mode')
+    string(name: 'FTP_CRED_ID',    defaultValue: 'smarterasp-ftp',     description: 'Jenkins credential ID (Username/Password)')
+    // ---- Publish mode ----
+    choice(name: 'PUBLISH_MODE', choices: ['FrameworkDependent','SelfContained-win-x86'], description: 'Publish style')
   }
 
   environment {
-    DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
-    DOTNET_NOLOGO = '1'
-    // Do NOT override WORKSPACE; Jenkins sets it.
-    PUBLISH_DIR = "${env.WORKSPACE}\\publish"
-    MSDEPLOY_EXE = 'C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe'
+    PUBLISH_DIR = "${WORKSPACE}\\publish"
   }
 
   stages {
-    // SCM checkout handled by jobs SCM config
-
-    stage('Restore & Build') {
+    stage('Build') {
       steps {
-        bat '''
-          @echo on
-          where dotnet || (echo ERROR: .NET SDK not found & exit /b 1)
+        powershell '''
+          $ErrorActionPreference = "Stop"
+          $proj = Get-ChildItem -Recurse -Filter *.csproj |
+                  Where-Object { $_.FullName -notmatch "(test|tests)\\" } |
+                  Select-Object -First 1
+          if (-not $proj) { throw "No .csproj found (excluding tests)" }
 
-          for /f "usebackq delims=" %%f in (`powershell -NoP -C "(Get-ChildItem -Recurse -Filter *.csproj | Select-Object -First 1).FullName"`) do (
-            echo %%f > project.path
-          )
-          if not exist project.path (
-            echo ERROR: No .csproj found
-            exit /b 1
-          )
-          set /p CSPROJ=<project.path
-          echo Found project: %CSPROJ%
-
-          dotnet restore "%CSPROJ%"
-          dotnet build   "%CSPROJ%" -c "%CONFIGURATION%"
+          dotnet --info | Out-Host
+          dotnet restore $proj.FullName
+          dotnet build   $proj.FullName -c Release --no-restore
         '''
       }
     }
 
-    stage('Publish (Release folder)') {
+    stage('Publish') {
       steps {
-        bat '''
-          if not exist project.path (
-            echo ERROR: project.path not found - build stage failed or was skipped
-            exit /b 1
-          )
-          set /p CSPROJ=<project.path
+        powershell '''
+          $ErrorActionPreference = "Stop"
 
-          if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
-          mkdir "%PUBLISH_DIR%"
+          if (Test-Path $env:PUBLISH_DIR) { Remove-Item -Recurse -Force $env:PUBLISH_DIR }
+          New-Item -ItemType Directory -Force -Path $env:PUBLISH_DIR | Out-Null
 
-          dotnet publish "%CSPROJ%" -c "%CONFIGURATION%" -o "%PUBLISH_DIR%" --no-build
-          if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
-          dir "%PUBLISH_DIR%"
+          $proj = Get-ChildItem -Recurse -Filter *.csproj |
+                  Where-Object { $_.FullName -notmatch "(test|tests)\\" } |
+                  Select-Object -First 1
+          if (-not $proj) { throw "No .csproj found (excluding tests)" }
+
+          if ($env:PUBLISH_MODE -eq 'SelfContained-win-x86') {
+            dotnet publish $proj.FullName -c Release -o $env:PUBLISH_DIR -r win-x86 --self-contained true /p:PublishSingleFile=false
+          } else {
+            dotnet publish $proj.FullName -c Release -o $env:PUBLISH_DIR --no-build
+          }
+
+          $dll = Get-ChildItem -Path $env:PUBLISH_DIR -Filter *.dll |
+                 Where-Object { $_.Name -notmatch "(test|xunit)" } | Select-Object -First 1
+          if (-not $dll) { throw "Publish produced no DLLs in $env:PUBLISH_DIR" }
+
+          Write-Host "Publish OK → $($env:PUBLISH_DIR)"
         '''
-        stash name: 'published', includes: 'publish/**'
+        stash name: 'publish-folder', includes: 'publish/**'
+        archiveArtifacts artifacts: 'publish/**', fingerprint: true, onlyIfSuccessful: true
       }
     }
 
-    stage('Smoke-test (local run)') {
-        steps {
-            unstash 'published'
-            powershell '''
+    stage('Deploy (WebDeploy)') {
+      when { expression { params.DEPLOY_METHOD == 'WebDeploy' } }
+      steps {
+        withCredentials([[$class: 'UsernamePasswordMultiBinding',
+                          credentialsId: "${params.WEBDEPLOY_CRED_ID}",
+                          usernameVariable: 'WD_USER',
+                          passwordVariable: 'WD_PASS']]) {
+          powershell '''
             $ErrorActionPreference = "Stop"
-            $pub = "$env:PUBLISH_DIR"
-            $dll = Get-ChildItem -LiteralPath $pub -Filter *.dll | Where-Object { $_.Name -notmatch "test|xunit" } | Select-Object -First 1
-            if (-not $dll) { throw "No DLL found in $pub" }
 
-            # Start the app
-            $env:ASPNETCORE_URLS = "http://localhost:$($env:SMOKE_PORT)"
-            $proc = Start-Process -FilePath "dotnet" -ArgumentList "`"$($dll.FullName)`"" -WorkingDirectory $pub -PassThru
-            Set-Content "$env:WORKSPACE\\smoke.pid" $proc.Id
+            # Resolve envs to normal PS vars (avoids $env:XYZ followed by ':' issues)
+            $msd  = "C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe"
+            if (-not (Test-Path $msd)) { throw "msdeploy.exe not found at '$msd'. Install Web Deploy 3.6+ on this agent." }
 
-            # Wait until it responds
-            $base = "http://localhost:$($env:SMOKE_PORT)"
-            $deadline = (Get-Date).AddMinutes(2)
-            while ((Get-Date) -lt $deadline) {
-                try { Invoke-WebRequest -UseBasicParsing -Uri "$base/" -TimeoutSec 2 | Out-Null; break }
-                catch { Start-Sleep -Milliseconds 500 }
-            }
+            $pub  = $env:PUBLISH_DIR
+            $site = $env:IIS_SITE_NAME
+            $url  = $env:WEBDEPLOY_URL
+            $user = $env:WD_USER
+            $pass = $env:WD_PASS
 
-            # Probe list
-            $paths = ($env:SMOKE_URLS -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-            $results = @()
-            foreach ($path in $paths) {
-                $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                $code = $null; $ok = $false; $bytes = $null; $err = $null
-                try {
-                $r = Invoke-WebRequest -UseBasicParsing -Uri ($base + $path) -TimeoutSec 10
-                $code  = [int]$r.StatusCode
-                $bytes = $r.RawContentLength
-                $ok = $true
-                } catch {
-                # Try to extract HTTP code from the exception (may be null on connect errors)
-                try { $code = [int]$_.Exception.Response.StatusCode } catch { $code = $null }
-                $err = ($_.Exception.Message -replace "`r|`n"," ")
-                } finally { $sw.Stop() }
+            $src  = "-source:contentPath=$pub"
+            $dst  = "-dest:contentPath=$site,computerName=$url,userName=$user,password=$pass,authType=Basic,includeAcls=False"
 
-                $results += [pscustomobject]@{
-                Path   = $path
-                Url    = ($base + $path)
-                Status = if ($code) { $code } else { 'N/A' }
-                Ms     = $sw.ElapsedMilliseconds
-                Bytes  = if ($bytes) { $bytes } else { 0 }
-                Error  = $err
-                }
-            }
+            $args = @(
+              '-verb:sync',
+              $src,
+              $dst,
+              '-allowUntrusted',
+              '-disableLink:AppPoolExtension',
+              '-disableLink:ContentExtension',
+              '-disableLink:CertificateExtension',
+              '-retryAttempts:2',
+              '-retryInterval:2000',
+              '-verbose'
+            )
 
-            # Console summary
-            Write-Host "---- Smoke Test Results ----"
-            $results | ForEach-Object {
-                $line = "{0,-16} {1,-6} {2,6} ms {3,8} bytes  {4}" -f $_.Path, $_.Status, $_.Ms, $_.Bytes, $_.Error
-                Write-Host $line
-            }
-
-            # Save artifacts
-            $csv = "$env:WORKSPACE\\smoke-results.csv"
-            $json = "$env:WORKSPACE\\smoke-results.json"
-            $results | Export-Csv -NoTypeInformation -Path $csv -Encoding UTF8
-            $results | ConvertTo-Json -Depth 4 | Out-File -FilePath $json -Encoding UTF8
-
-            # Fail if all probes failed
-            if (-not ($results | Where-Object { $_.Status -ne 'N/A' -and [int]$_.Status -ge 200 -and [int]$_.Status -lt 600 })) {
-                throw "Smoke test failed: no endpoints responded."
-            }
-
-            Write-Host "Smoke test passed at $base"
-            '''
+            & $msd @args
+          '''
         }
-        post {
-            always {
-            // stop app (your existing cleanup) + archive the report files
-            powershell '''
-                $ErrorActionPreference = "SilentlyContinue"
-                $pidFile = "$env:WORKSPACE\\smoke.pid"
-                if (Test-Path $pidFile) {
-                try {
-                    $smokePid = [int](Get-Content -Path $pidFile -Raw).Trim()
-                    if ($smokePid -gt 0) { Stop-Process -Id $smokePid -Force -ErrorAction SilentlyContinue }
-                } catch {}
-                Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
-                }
-            '''
-            archiveArtifacts artifacts: 'smoke-results.*', fingerprint: true
-            }
-        }
+      }
     }
 
-    stage('Deploy') {
-    when { anyOf { environment name: 'DEPLOY_METHOD', value: 'WEBDEPLOY'; environment name: 'DEPLOY_METHOD', value: 'FTP' } }
-    steps {
-      powershell '''
-        $ErrorActionPreference = "Stop"
-
-        if ($env:DEPLOY_METHOD -eq 'WEBDEPLOY') {
-          # --- Find the publish zip (created in earlier stage) ---
-          $pub = "$env:PUBLISH_DIR"
-          if (-not (Test-Path $pub)) { throw "Publish dir not found: $pub" }
-          $pkg = Get-ChildItem -Path $pub -Filter *.zip -File | Select-Object -First 1
-          if (-not $pkg) { throw "No publish .zip found in $pub" }
-
-          # --- msdeploy path ---
-          $msdeploy = "$env:MSDEPLOY_EXE"
-          if (-not (Test-Path $msdeploy)) { throw "msdeploy.exe not found at $msdeploy" }
-
-          # --- Run Web Deploy (SmarterASP.NET) ---
-          & "$msdeploy" `
-            -source:package="$($pkg.FullName)" `
-            -dest:auto,ComputerName="https://$($env:WD_SERVER):$($env:WD_PORT)/msdeploy.axd?site=$($env:SITE_NAME)", `
-                UserName="$($env:WD_USER)",Password="$($env:WD_PASS)",AuthType="Basic" `
-            -allowUntrusted `
-            -verb:sync `
-            -enableRule:DoNotDeleteRule
+    stage('Deploy (FTP/FTPS)') {
+      when { expression { params.DEPLOY_METHOD == 'FTP' } }
+      steps {
+        script {
+          env.FTP_SECURE   = params.FTPS ? 'Explicit' : 'None'
+          env.FTP_PASSIVE  = params.FTP_PASSIVE ? '1' : '0'
+          env.TLS_INSECURE = params.FTPS ? 'false' : 'true'
         }
-        elseif ($env:DEPLOY_METHOD -eq 'FTP') {
-          # --- Upload via FTP to SmarterASP.NET ---
-          $pub = "$env:PUBLISH_DIR"
-          if (-not (Test-Path $pub)) { throw "Publish dir not found: $pub" }
+        withCredentials([[$class: 'UsernamePasswordMultiBinding',
+                          credentialsId: "${params.FTP_CRED_ID}",
+                          usernameVariable: 'FTP_USER',
+                          passwordVariable: 'FTP_PASS']]) {
+          powershell '''
+            $ErrorActionPreference = 'Stop'
 
-          $ftpRoot = "ftp://$($env:FTP_HOST)$($env:FTP_PATH.TrimEnd('/'))/"
-          $creds   = New-Object System.Net.NetworkCredential($env:FTP_USER, $env:FTP_PASS)
+            # Resolve envs to normal PS vars first
+            $ftpHost = $env:FTP_HOST
+            $ftpDir  = $env:FTP_DIR
+            $pub     = $env:PUBLISH_DIR
+            $user    = $env:FTP_USER
+            $pass    = $env:FTP_PASS
+            $secure  = $env:FTP_SECURE
+            $passive = $env:FTP_PASSIVE
+            $tlsInsec= $env:TLS_INSECURE
 
-          function Ensure-FtpFolder {
-            param([string]$FullPath)
-            $parts = $FullPath.Trim('/').Split('/') | Where-Object { $_ -ne '' }
-            $built = ""
-            foreach ($p in $parts) {
-              $built = if ($built) { "$built/$p" } else { $p }
-              $mk = [System.Net.FtpWebRequest]::Create($ftpRoot + $built)
-              $mk.Method = [System.Net.WebRequestMethods+Ftp]::MakeDirectory
-              $mk.Credentials = $creds
-              try { $mk.GetResponse().Close() } catch { } # ignore if exists
+            # Load WinSCP .NET
+            $winscpDlls = @(
+              'C:\Program Files (x86)\WinSCP\WinSCPnet.dll',
+              'C:\Program Files\WinSCP\WinSCPnet.dll'
+            )
+            $dll = $winscpDlls | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $dll) { throw 'WinSCP not found. Install WinSCP on the agent.' }
+            Add-Type -Path $dll
+
+            $sessionOptions = New-Object WinSCP.SessionOptions
+            $sessionOptions.Protocol = [WinSCP.Protocol]::Ftp
+            $sessionOptions.HostName = $ftpHost
+            $sessionOptions.UserName = $user
+            $sessionOptions.Password = $pass
+            $sessionOptions.FtpSecure = [Enum]::Parse([WinSCP.FtpSecure], $secure)
+
+            if ($tlsInsec -eq 'true') {
+              $sessionOptions.GiveUpSecurityAndAcceptAnyTlsHostCertificate = $true
             }
-          }
 
-          Get-ChildItem -Path $pub -Recurse -File | ForEach-Object {
-            $rel = $_.FullName.Substring($pub.Length).TrimStart('\').Replace('\','/')
-            $dir = Split-Path $rel -Parent
-            if ($dir) { Ensure-FtpFolder -FullPath $dir }
+            $transferOptions = New-Object WinSCP.TransferOptions
+            $transferOptions.TransferMode = [WinSCP.TransferMode]::Binary
 
-            $uri = [System.Uri]::new($ftpRoot + $rel)
-            $req = [System.Net.FtpWebRequest]::Create($uri)
-            $req.Method = [System.Net.WebRequestMethods+Ftp]::UploadFile
-            $req.Credentials = $creds
-            $req.UseBinary = $true
-            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
-            $stream = $req.GetRequestStream()
-            $stream.Write($bytes, 0, $bytes.Length)
-            $stream.Close()
-            $res = $req.GetResponse(); $res.Close()
-          }
+            $session = New-Object WinSCP.Session
+            try {
+              $session.Open($sessionOptions)
+              $session.AddRawSettings('FtpPassive', $passive)
+
+              $syncResult = $session.SynchronizeDirectories(
+                [WinSCP.SynchronizationMode]::Remote,
+                $pub,
+                $ftpDir,
+                $true
+              )
+              $syncResult.Check()
+            }
+            finally {
+              $session.Dispose()
+            }
+            Write-Host 'FTP/FTPS deployment complete.'
+          '''
         }
-        else {
-          throw "Unknown DEPLOY_METHOD '$($env:DEPLOY_METHOD)'"
-        }
-      '''
+      }
     }
   }
 
-
-}
-
   post {
-    success { echo '✅ Build, smoke-test, and deployment completed successfully.' }
-    failure { echo '❌ Pipeline failed. See error logs above.' }
+    failure {
+      powershell '''
+        Write-Host "Last modified files under WORKSPACE:"
+        Get-ChildItem -Recurse $env:WORKSPACE |
+          Sort-Object LastWriteTime -Descending |
+          Select-Object -First 50 FullName,Length,LastWriteTime |
+          Format-Table -AutoSize | Out-Host
+      '''
+    }
   }
 }
