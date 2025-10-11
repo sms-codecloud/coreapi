@@ -98,7 +98,10 @@ pipeline {
             -allowUntrusted `
             -verb:sync `
             -retryAttempts:2 -retryInterval:2000 `
-            -disableLink:AppPoolExtension -disableLink:ContentExtension -disableLink:CertificateExtension
+            -disableLink:AppPoolExtension -disableLink:ContentExtension -disableLink:CertificateExtension `
+            -enableRule:DoNotDeleteRule `
+            -skip:objectName=filePath,absolutePath=".*\\aspnetcorev2_inprocess\.dll" `
+            -skip:objectName=dirPath,absolutePath=".*\\\.well-known(\\.*)?"
         '''
       }
     }
