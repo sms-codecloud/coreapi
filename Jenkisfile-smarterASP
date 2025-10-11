@@ -79,32 +79,44 @@ pipeline {
         powershell '''
           $ErrorActionPreference = "Stop"
 
-          $pub = "$env:PUBLISH_DIR"
+          # --- Resolve environment variables ---
+          $pub    = "$env:PUBLISH_DIR"
           if (-not (Test-Path $pub)) { throw "Publish dir not found: $pub" }
 
           $msdeploy = "$env:MSDEPLOY_EXE"
           if (-not (Test-Path $msdeploy)) { throw "msdeploy.exe not found at $msdeploy" }
 
-          $site   = $env:SITE_NAME
-          $server = $env:WD_SERVER
-          $port   = $env:WD_PORT
-          $user   = $env:WD_USER
-          $pass   = $env:WD_PASS
+          $site   = "$env:SITE_NAME"
+          $server = "$env:WD_SERVER"
+          $port   = "$env:WD_PORT"
+          $user   = "$env:WD_USER"
+          $pass   = "$env:WD_PASS"
 
-          # Wrap whole -source/-dest in quotes so each is one argument
+          # --- Prepare msdeploy args ---
+          $src  = "-source:contentPath=$pub"
+          $dest = "-dest:contentPath=$site,ComputerName=https://$server`:$port/msdeploy.axd?site=$site,UserName=$user,Password=$pass,AuthType=Basic,includeAcls=False"
+
+          # --- Skip protected and locked paths ---
+          $skip1 = '-skip:objectName=filePath,absolutePath=.*\\\\aspnetcorev2_inprocess\\.dll'
+          $skip2 = '-skip:objectName=dirPath,absolutePath=.*\\\\\\.well-known(\\\\.*)?'
+
+          # --- Execute msdeploy ---
           & "$msdeploy" `
-            "-source:contentPath=$pub" `
-            "-dest:contentPath=$site,ComputerName=https://$server`:$port/msdeploy.axd?site=$site,UserName=$user,Password=$pass,AuthType=Basic,includeAcls=False" `
+            $src `
+            $dest `
             -allowUntrusted `
             -verb:sync `
             -retryAttempts:2 -retryInterval:2000 `
-            -disableLink:AppPoolExtension -disableLink:ContentExtension -disableLink:CertificateExtension `
+            -disableLink:AppPoolExtension `
+            -disableLink:ContentExtension `
+            -disableLink:CertificateExtension `
             -enableRule:DoNotDeleteRule `
-            -skip:objectName=filePath,absolutePath=".*\\aspnetcorev2_inprocess\.dll" `
-            -skip:objectName=dirPath,absolutePath=".*\\\.well-known(\\.*)?"
+            $skip1 `
+            $skip2
         '''
       }
     }
+
 
     stage('Deploy (FTP/FTPS)') {
       when { expression { params.DEPLOY_METHOD == 'FTP' } }
