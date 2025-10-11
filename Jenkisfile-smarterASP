@@ -79,7 +79,6 @@ pipeline {
         powershell '''
           $ErrorActionPreference = "Stop"
 
-          # --- Resolve environment variables ---
           $pub    = "$env:PUBLISH_DIR"
           if (-not (Test-Path $pub)) { throw "Publish dir not found: $pub" }
 
@@ -92,21 +91,19 @@ pipeline {
           $user   = "$env:WD_USER"
           $pass   = "$env:WD_PASS"
 
-          # --- Prepare msdeploy args ---
           $src  = "-source:contentPath=$pub"
           $dest = "-dest:contentPath=$site,ComputerName=https://$server`:$port/msdeploy.axd?site=$site,UserName=$user,Password=$pass,AuthType=Basic,includeAcls=False"
 
-          # --- Skip protected and locked paths ---
           $skip1 = '-skip:objectName=filePath,absolutePath=.*\\\\aspnetcorev2_inprocess\\.dll'
           $skip2 = '-skip:objectName=dirPath,absolutePath=.*\\\\\\.well-known(\\\\.*)?'
 
-          # --- Execute msdeploy ---
           & "$msdeploy" `
             $src `
             $dest `
             -allowUntrusted `
             -verb:sync `
-            -retryAttempts:2 -retryInterval:2000 `
+            -retryAttempts:5 -retryInterval:3000 `
+            -enableRule:AppOffline `
             -disableLink:AppPoolExtension `
             -disableLink:ContentExtension `
             -disableLink:CertificateExtension `
@@ -116,6 +113,7 @@ pipeline {
         '''
       }
     }
+
 
 
     stage('Deploy (FTP/FTPS)') {
