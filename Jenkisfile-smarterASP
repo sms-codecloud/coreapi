@@ -1,196 +1,157 @@
 pipeline {
   agent { label 'win-agent-1' }
-  options { disableConcurrentBuilds(); timestamps(); ansiColor('xterm') }
 
   parameters {
-    choice(name: 'DEPLOY_METHOD', choices: ['WebDeploy','FTP'], description: 'Choose how to deploy')
-    // ---- WebDeploy ----
-    string(name: 'WEBDEPLOY_URL',      defaultValue: 'https://publish.smarterasp.net:8172/msdeploy.axd?site=<your-site>', description: 'SmarterASP Web Deploy service URL')
-    string(name: 'IIS_SITE_NAME',      defaultValue: '<your-site>', description: 'SmarterASP site/app name')
-    string(name: 'WEBDEPLOY_CRED_ID',  defaultValue: 'smarterasp-webdeploy', description: 'Jenkins credential ID (Username/Password)')
-    // ---- FTP/FTPS ----
-    string(name: 'FTP_HOST',       defaultValue: 'ftp.smarterasp.net', description: 'FTP/FTPS host')
-    string(name: 'FTP_DIR',        defaultValue: '/wwwroot',           description: 'Remote directory')
-    booleanParam(name: 'FTPS',         defaultValue: true,  description: 'Use FTPS (Explicit TLS)')
-    booleanParam(name: 'FTP_PASSIVE',  defaultValue: true,  description: 'Passive mode')
-    string(name: 'FTP_CRED_ID',    defaultValue: 'smarterasp-ftp',     description: 'Jenkins credential ID (Username/Password)')
-    // ---- Publish mode ----
-    choice(name: 'PUBLISH_MODE', choices: ['FrameworkDependent','SelfContained-win-x86'], description: 'Publish style')
+    string(name: 'CONFIGURATION', defaultValue: 'Release', description: 'Build configuration (Debug/Release)')
+    choice(name:  'DEPLOY_METHOD', choices: ['WEBDEPLOY','FTP'], description: 'Choose deployment method')
+
+    // Web Deploy (from SmarterASP.NET control panel → VS WebDeploy)
+    string(name: 'SITE_NAME', defaultValue: 'your-site-name', description: 'IIS Site name in control panel')
+    string(name: 'WD_SERVER', defaultValue: 'webdeploy.smarterasp.net', description: 'Web Deploy server host')
+    string(name: 'WD_PORT',   defaultValue: '8172', description: 'Web Deploy port (usually 8172)')
+
+    // FTP fallback
+    string(name: 'FTP_HOST',  defaultValue: 'ftp.smarterasp.net', description: 'FTP host')
+    string(name: 'FTP_PATH',  defaultValue: '/wwwroot', description: 'Target folder for upload')
   }
 
   environment {
-    PUBLISH_DIR = "${WORKSPACE}\\publish"
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
+    DOTNET_NOLOGO = '1'
+    // Do NOT override WORKSPACE; Jenkins sets it.
+    PUBLISH_DIR = "${env.WORKSPACE}\\publish"
+    MSDEPLOY_EXE = 'C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe'
   }
 
   stages {
-    stage('Build') {
-      steps {
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          $proj = Get-ChildItem -Recurse -Filter *.csproj |
-                  Where-Object { $_.FullName -notmatch "(test|tests)\\" } |
-                  Select-Object -First 1
-          if (-not $proj) { throw "No .csproj found (excluding tests)" }
+    // SCM checkout handled by jobs SCM config
 
-          dotnet --info | Out-Host
-          dotnet restore $proj.FullName
-          dotnet build   $proj.FullName -c Release --no-restore
+    stage('Restore & Build') {
+      steps {
+        bat '''
+          @echo on
+          where dotnet || (echo ERROR: .NET SDK not found & exit /b 1)
+
+          for /f "usebackq delims=" %%f in (`powershell -NoP -C "(Get-ChildItem -Recurse -Filter *.csproj | Select-Object -First 1).FullName"`) do (
+            echo %%f > project.path
+          )
+          if not exist project.path (
+            echo ERROR: No .csproj found
+            exit /b 1
+          )
+          set /p CSPROJ=<project.path
+          echo Found project: %CSPROJ%
+
+          dotnet restore "%CSPROJ%"
+          dotnet build   "%CSPROJ%" -c "%CONFIGURATION%"
         '''
       }
     }
 
-    stage('Publish') {
+    stage('Publish (Release folder)') {
+      steps {
+        bat '''
+          @echo on
+          if not exist project.path (
+            echo ERROR: project.path not found - build stage failed or was skipped
+            exit /b 1
+          )
+          set /p CSPROJ=<project.path
+
+          if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
+          mkdir "%PUBLISH_DIR%"
+
+          dotnet publish "%CSPROJ%" -c "%CONFIGURATION%" -o "%PUBLISH_DIR%" --no-build
+          if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+
+          rem === Create the ZIP that Deploy expects ===
+          powershell -NoProfile -NonInteractive -Command ^
+            "Compress-Archive -Path (Join-Path $env:PUBLISH_DIR '*') -DestinationPath (Join-Path $env:PUBLISH_DIR ('app-{0}.zip' -f $env:BUILD_NUMBER)) -Force"
+
+          if not exist "%PUBLISH_DIR%\\app-%BUILD_NUMBER%.zip" (
+            echo ERROR: Failed to create publish zip: %PUBLISH_DIR%\\app-%BUILD_NUMBER%.zip
+            exit /b 1
+          )
+
+          dir "%PUBLISH_DIR%"
+        '''
+        stash name: 'published', includes: 'publish/**'
+      }
+    }
+
+    stage('Deploy') {
+      when { anyOf { environment name: 'DEPLOY_METHOD', value: 'WEBDEPLOY'; environment name: 'DEPLOY_METHOD', value: 'FTP' } }
       steps {
         powershell '''
           $ErrorActionPreference = "Stop"
+          if ($env:DEPLOY_METHOD -eq 'WEBDEPLOY') {
+            # --- Find the publish zip (now created in Publish stage) ---
+            $pub = "$env:PUBLISH_DIR"
+            if (-not (Test-Path $pub)) { throw "Publish dir not found: $pub" }
+            $pkg = Get-ChildItem -Path $pub -Filter *.zip -File | Select-Object -First 1
+            if (-not $pkg) { throw "No publish .zip found in $pub" }
 
-          if (Test-Path $env:PUBLISH_DIR) { Remove-Item -Recurse -Force $env:PUBLISH_DIR }
-          New-Item -ItemType Directory -Force -Path $env:PUBLISH_DIR | Out-Null
+            # --- msdeploy path ---
+            $msdeploy = "$env:MSDEPLOY_EXE"
+            if (-not (Test-Path $msdeploy)) { throw "msdeploy.exe not found at $msdeploy" }
 
-          $proj = Get-ChildItem -Recurse -Filter *.csproj |
-                  Where-Object { $_.FullName -notmatch "(test|tests)\\" } |
-                  Select-Object -First 1
-          if (-not $proj) { throw "No .csproj found (excluding tests)" }
-
-          if ($env:PUBLISH_MODE -eq 'SelfContained-win-x86') {
-            dotnet publish $proj.FullName -c Release -o $env:PUBLISH_DIR -r win-x86 --self-contained true /p:PublishSingleFile=false
-          } else {
-            dotnet publish $proj.FullName -c Release -o $env:PUBLISH_DIR --no-build
+            # --- Run Web Deploy (SmarterASP.NET) ---
+            & "$msdeploy" `
+              -source:package="$($pkg.FullName)" `
+              -dest:auto,ComputerName="https://$($env:WD_SERVER):$($env:WD_PORT)/msdeploy.axd?site=$($env:SITE_NAME)", `
+                  UserName="$($env:WD_USER)",Password="$($env:WD_PASS)",AuthType="Basic" `
+              -allowUntrusted `
+              -verb:sync `
+              -enableRule:DoNotDeleteRule
           }
+          elseif ($env:DEPLOY_METHOD -eq 'FTP') {
+            # --- Upload via FTP to SmarterASP.NET ---
+            $pub = "$env:PUBLISH_DIR"
+            if (-not (Test-Path $pub)) { throw "Publish dir not found: $pub" }
 
-          $dll = Get-ChildItem -Path $env:PUBLISH_DIR -Filter *.dll |
-                 Where-Object { $_.Name -notmatch "(test|xunit)" } | Select-Object -First 1
-          if (-not $dll) { throw "Publish produced no DLLs in $env:PUBLISH_DIR" }
+            $ftpRoot = "ftp://$($env:FTP_HOST)$($env:FTP_PATH.TrimEnd('/'))/"
+            $creds   = New-Object System.Net.NetworkCredential($env:FTP_USER, $env:FTP_PASS)
 
-          Write-Host "Publish OK → $($env:PUBLISH_DIR)"
+            function Ensure-FtpFolder {
+              param([string]$FullPath)
+              $parts = $FullPath.Trim('/').Split('/') | Where-Object { $_ -ne '' }
+              $built = ""
+              foreach ($p in $parts) {
+                $built = if ($built) { "$built/$p" } else { $p }
+                $mk = [System.Net.FtpWebRequest]::Create($ftpRoot + $built)
+                $mk.Method = [System.Net.WebRequestMethods+Ftp]::MakeDirectory
+                $mk.Credentials = $creds
+                try { $mk.GetResponse().Close() } catch { } # ignore if exists
+              }
+            }
+
+            Get-ChildItem -Path $pub -Recurse -File | ForEach-Object {
+              $rel = $_.FullName.Substring($pub.Length).TrimStart('\').Replace('\','/')
+              $dir = Split-Path $rel -Parent
+              if ($dir) { Ensure-FtpFolder -FullPath $dir }
+
+              $uri = [System.Uri]::new($ftpRoot + $rel)
+              $req = [System.Net.FtpWebRequest]::Create($uri)
+              $req.Method = [System.Net.WebRequestMethods+Ftp]::UploadFile
+              $req.Credentials = $creds
+              $req.UseBinary = $true
+              $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+              $stream = $req.GetRequestStream()
+              $stream.Write($bytes, 0, $bytes.Length)
+              $stream.Close()
+              $res = $req.GetResponse(); $res.Close()
+            }
+          }
+          else {
+            throw "Unknown DEPLOY_METHOD '$($env:DEPLOY_METHOD)'"
+          }
         '''
-        stash name: 'publish-folder', includes: 'publish/**'
-        archiveArtifacts artifacts: 'publish/**', fingerprint: true, onlyIfSuccessful: true
-      }
-    }
-
-    stage('Deploy (WebDeploy)') {
-      when { expression { params.DEPLOY_METHOD == 'WebDeploy' } }
-      steps {
-        withCredentials([[$class: 'UsernamePasswordMultiBinding',
-                          credentialsId: "${params.WEBDEPLOY_CRED_ID}",
-                          usernameVariable: 'WD_USER',
-                          passwordVariable: 'WD_PASS']]) {
-          powershell '''
-            $ErrorActionPreference = "Stop"
-
-            # Resolve envs to normal PS vars (avoids $env:XYZ followed by ':' issues)
-            $msd  = "C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe"
-            if (-not (Test-Path $msd)) { throw "msdeploy.exe not found at '$msd'. Install Web Deploy 3.6+ on this agent." }
-
-            $pub  = $env:PUBLISH_DIR
-            $site = $env:IIS_SITE_NAME
-            $url  = $env:WEBDEPLOY_URL
-            $user = $env:WD_USER
-            $pass = $env:WD_PASS
-
-            $src  = "-source:contentPath=$pub"
-            $dst  = "-dest:contentPath=$site,computerName=$url,userName=$user,password=$pass,authType=Basic,includeAcls=False"
-
-            $args = @(
-              '-verb:sync',
-              $src,
-              $dst,
-              '-allowUntrusted',
-              '-disableLink:AppPoolExtension',
-              '-disableLink:ContentExtension',
-              '-disableLink:CertificateExtension',
-              '-retryAttempts:2',
-              '-retryInterval:2000',
-              '-verbose'
-            )
-
-            & $msd @args
-          '''
-        }
-      }
-    }
-
-    stage('Deploy (FTP/FTPS)') {
-      when { expression { params.DEPLOY_METHOD == 'FTP' } }
-      steps {
-        script {
-          env.FTP_SECURE   = params.FTPS ? 'Explicit' : 'None'
-          env.FTP_PASSIVE  = params.FTP_PASSIVE ? '1' : '0'
-          env.TLS_INSECURE = params.FTPS ? 'false' : 'true'
-        }
-        withCredentials([[$class: 'UsernamePasswordMultiBinding',
-                          credentialsId: "${params.FTP_CRED_ID}",
-                          usernameVariable: 'FTP_USER',
-                          passwordVariable: 'FTP_PASS']]) {
-          powershell '''
-            $ErrorActionPreference = 'Stop'
-
-            # Resolve envs to normal PS vars first
-            $ftpHost = $env:FTP_HOST
-            $ftpDir  = $env:FTP_DIR
-            $pub     = $env:PUBLISH_DIR
-            $user    = $env:FTP_USER
-            $pass    = $env:FTP_PASS
-            $secure  = $env:FTP_SECURE
-            $passive = $env:FTP_PASSIVE
-            $tlsInsec= $env:TLS_INSECURE
-
-            # Load WinSCP .NET
-            $winscpDlls = @(
-              'C:\Program Files (x86)\WinSCP\WinSCPnet.dll',
-              'C:\Program Files\WinSCP\WinSCPnet.dll'
-            )
-            $dll = $winscpDlls | Where-Object { Test-Path $_ } | Select-Object -First 1
-            if (-not $dll) { throw 'WinSCP not found. Install WinSCP on the agent.' }
-            Add-Type -Path $dll
-
-            $sessionOptions = New-Object WinSCP.SessionOptions
-            $sessionOptions.Protocol = [WinSCP.Protocol]::Ftp
-            $sessionOptions.HostName = $ftpHost
-            $sessionOptions.UserName = $user
-            $sessionOptions.Password = $pass
-            $sessionOptions.FtpSecure = [Enum]::Parse([WinSCP.FtpSecure], $secure)
-
-            if ($tlsInsec -eq 'true') {
-              $sessionOptions.GiveUpSecurityAndAcceptAnyTlsHostCertificate = $true
-            }
-
-            $transferOptions = New-Object WinSCP.TransferOptions
-            $transferOptions.TransferMode = [WinSCP.TransferMode]::Binary
-
-            $session = New-Object WinSCP.Session
-            try {
-              $session.Open($sessionOptions)
-              $session.AddRawSettings('FtpPassive', $passive)
-
-              $syncResult = $session.SynchronizeDirectories(
-                [WinSCP.SynchronizationMode]::Remote,
-                $pub,
-                $ftpDir,
-                $true
-              )
-              $syncResult.Check()
-            }
-            finally {
-              $session.Dispose()
-            }
-            Write-Host 'FTP/FTPS deployment complete.'
-          '''
-        }
       }
     }
   }
 
   post {
-    failure {
-      powershell '''
-        Write-Host "Last modified files under WORKSPACE:"
-        Get-ChildItem -Recurse $env:WORKSPACE |
-          Sort-Object LastWriteTime -Descending |
-          Select-Object -First 50 FullName,Length,LastWriteTime |
-          Format-Table -AutoSize | Out-Host
-      '''
-    }
+    success { echo '✅ Build, publish, and deployment completed successfully.' }
+    failure { echo '❌ Pipeline failed. See error logs above.' }
   }
 }
