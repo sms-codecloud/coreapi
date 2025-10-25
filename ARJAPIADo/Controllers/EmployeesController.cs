@@ -81,6 +81,7 @@ namespace ARJAPIADo.Controllers
             return Ok("Runnig shankar");
         }
         [HttpGet]
+        [Route("api/DisplayGreet")]
         public ActionResult DisplayGreet()
         {
             return Ok("Welcome to ARJ Workshop");
