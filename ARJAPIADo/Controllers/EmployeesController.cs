@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace ARJAPIADo.Controllers
 {
-    //[Route("api/[controller]")]
+    
     [ApiController]
     public class EmployeesController : ControllerBase
     {
@@ -80,5 +80,10 @@ namespace ARJAPIADo.Controllers
         {
             return Ok("Runnig shankar");
         }
-}
+        [HttpGet]
+        public ActionResult DisplayGreet()
+        {
+            return Ok("Welcome to ARJ Workshop");
+        }
+    }
 }
